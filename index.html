@@ -13,7 +13,7 @@
         
         body {
             font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-            background: #f0f0f0;
+            background: #f5f5f5;
             color: #333;
             min-height: 100vh;
             padding: 20px;
@@ -312,7 +312,6 @@
                     
                     <div class="speed-range">
                         <span>0.25x</span>
-                        <span>1.00x</span>
                         <span>4.00x</span>
                     </div>
                 </div>
@@ -340,410 +339,364 @@
     
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script>
-        // 全局变量
-        let originalZip = null;
-        let jsonFileName = null;
-        let jsonContent = null;
-        let originalSpeed = 1.0;
-        let speedMultiplier = 1.0;
+        let originalZip = null
+        let jsonFileName = null
+        let jsonContent = null
+        let originalSpeed = 1.0
+        let speedMultiplier = 1.0
+        let originalFileName = ""
         
-        // DOM元素
-        const uploadArea = document.getElementById('uploadArea');
-        const fileInput = document.getElementById('fileInput');
-        const loading = document.getElementById('loading');
-        const controlsSection = document.getElementById('controlsSection');
-        const fileInfo = document.getElementById('fileInfo');
-        const speedSlider = document.getElementById('speedSlider');
-        const speedValue = document.getElementById('speedValue');
-        const multiplierValue = document.getElementById('multiplierValue');
-        const downloadBtn = document.getElementById('downloadBtn');
-        const status = document.getElementById('status');
-        const note = document.getElementById('note');
+        const uploadArea = document.getElementById('uploadArea')
+        const fileInput = document.getElementById('fileInput')
+        const loading = document.getElementById('loading')
+        const controlsSection = document.getElementById('controlsSection')
+        const fileInfo = document.getElementById('fileInfo')
+        const speedSlider = document.getElementById('speedSlider')
+        const speedValue = document.getElementById('speedValue')
+        const multiplierValue = document.getElementById('multiplierValue')
+        const downloadBtn = document.getElementById('downloadBtn')
+        const status = document.getElementById('status')
+        const note = document.getElementById('note')
         
-        // 显示元素
-        const fileNameSpan = document.getElementById('fileName');
-        const originalSpeedSpan = document.getElementById('originalSpeed');
-        const newSpeedSpan = document.getElementById('newSpeed');
+        const fileNameSpan = document.getElementById('fileName')
+        const originalSpeedSpan = document.getElementById('originalSpeed')
+        const newSpeedSpan = document.getElementById('newSpeed')
         
-        // 初始化
         function init() {
-            // 上传区域点击事件
-            uploadArea.addEventListener('click', () => fileInput.click());
+            uploadArea.addEventListener('click', () => fileInput.click())
             
-            // 拖放事件
             uploadArea.addEventListener('dragover', (e) => {
-                e.preventDefault();
-                uploadArea.style.borderColor = '#3498db';
-            });
+                e.preventDefault()
+                uploadArea.style.borderColor = '#3498db'
+            })
             
             uploadArea.addEventListener('dragleave', () => {
-                uploadArea.style.borderColor = '#bdc3c7';
-            });
+                uploadArea.style.borderColor = '#bdc3c7'
+            })
             
             uploadArea.addEventListener('drop', (e) => {
-                e.preventDefault();
-                uploadArea.style.borderColor = '#bdc3c7';
+                e.preventDefault()
+                uploadArea.style.borderColor = '#bdc3c7'
                 
                 if (e.dataTransfer.files.length) {
-                    handleFileUpload(e.dataTransfer.files[0]);
+                    handleFileUpload(e.dataTransfer.files[0])
                 }
-            });
+            })
             
-            // 文件选择事件
             fileInput.addEventListener('change', (e) => {
                 if (e.target.files.length) {
-                    handleFileUpload(e.target.files[0]);
+                    handleFileUpload(e.target.files[0])
                 }
-            });
+            })
             
-            // 速度滑块事件 - 实时更新
-            speedSlider.addEventListener('input', () => {
-                updateSpeed();
-                updateAnimation();
-            });
+            speedSlider.addEventListener('input', handleSliderChange)
             
-            // 初始化动画
-            startAnimation();
+            startAnimation()
         }
         
-        // 处理文件上传
+        function handleSliderChange() {
+            const value = parseFloat(speedSlider.value)
+            updateSpeed(value)
+        }
+        
+        function updateSpeed(value) {
+            speedMultiplier = value
+            
+            speedValue.textContent = value.toFixed(2) + 'x'
+            multiplierValue.textContent = '×' + value.toFixed(2)
+            
+            const newSpeed = originalSpeed * value
+            newSpeedSpan.textContent = newSpeed.toFixed(2)
+            
+            updateAnimation()
+        }
+        
         async function handleFileUpload(file) {
             if (!file.name.toLowerCase().endsWith('.zip')) {
-                showStatus('请上传ZIP文件', 'error');
-                return;
+                showStatus('请上传ZIP文件', 'error')
+                return
             }
             
-            loading.classList.add('show');
+            loading.classList.add('show')
             
             try {
-                // 读取ZIP文件
-                const arrayBuffer = await file.arrayBuffer();
-                originalZip = await JSZip.loadAsync(arrayBuffer);
+                originalFileName = file.name.replace(/\.zip$/i, '')
                 
-                // 查找JSON文件
-                const jsonFiles = [];
+                const arrayBuffer = await file.arrayBuffer()
+                originalZip = await JSZip.loadAsync(arrayBuffer)
+                
+                const jsonFiles = []
                 originalZip.forEach((relativePath, fileEntry) => {
                     if (!fileEntry.dir && relativePath.toLowerCase().endsWith('.json')) {
-                        jsonFiles.push(relativePath);
+                        jsonFiles.push(relativePath)
                     }
-                });
+                })
                 
                 if (jsonFiles.length === 0) {
-                    throw new Error('ZIP文件中未找到JSON文件');
+                    throw new Error('ZIP文件中未找到JSON文件')
                 }
                 
-                // 取第一个JSON文件
-                jsonFileName = jsonFiles[0];
+                jsonFileName = jsonFiles[0]
                 
-                // 读取JSON文件
-                const jsonFile = originalZip.file(jsonFileName);
+                const jsonFile = originalZip.file(jsonFileName)
                 if (!jsonFile) {
-                    throw new Error('无法读取JSON文件');
+                    throw new Error('无法读取JSON文件')
                 }
                 
-                const jsonText = await jsonFile.async('text');
-                jsonContent = jsonText;
+                const jsonText = await jsonFile.async('text')
+                jsonContent = jsonText
                 
-                // 使用C++逻辑查找第一个speed值
-                originalSpeed = findFirstSpeedWithCppLogic(jsonContent);
+                originalSpeed = findFirstSpeedWithCppLogic(jsonText)
                 if (originalSpeed === null) {
-                    originalSpeed = 1.0;
-                    showStatus('未找到speed字段，使用默认速度1.0', 'error');
+                    originalSpeed = 1.0
                 }
                 
-                // 更新显示
-                fileNameSpan.textContent = file.name;
-                originalSpeedSpan.textContent = originalSpeed.toFixed(2);
+                fileNameSpan.textContent = file.name
+                originalSpeedSpan.textContent = originalSpeed.toFixed(2)
                 
-                // 显示控制区域
-                controlsSection.classList.add('show');
-                fileInfo.classList.add('show');
+                controlsSection.classList.add('show')
+                fileInfo.classList.add('show')
                 
-                // 启用下载按钮
-                downloadBtn.disabled = false;
+                downloadBtn.disabled = false
                 
-                // 更新速度和预览
-                updateSpeed();
-                updateAnimation();
+                updateSpeed(1.0)
+                updateAnimation()
                 
-                showStatus('成功加载谱面', 'success');
+                showStatus('成功加载谱面', 'success')
                 
             } catch (error) {
-                showStatus(`处理失败: ${error.message}`, 'error');
-                console.error(error);
+                showStatus(`处理失败: ${error.message}`, 'error')
+                console.error(error)
             } finally {
-                loading.classList.remove('show');
+                loading.classList.remove('show')
             }
         }
         
-        // 严格按照C++逻辑查找第一个speed值
         function findFirstSpeedWithCppLogic(jsonText) {
-            // 状态机实现，完全匹配C++代码逻辑
-            let state = 0; // 0=正常寻找"，1=找到"匹配key，2=匹配到speed读取数值
-            let current = '';
-            let speedValue = null;
-            let inSpeedKey = false;
+            let state = 0
+            let current = ''
+            let speedValue = null
             
             for (let i = 0; i < jsonText.length; i++) {
-                const ch = jsonText[i];
+                const ch = jsonText[i]
                 
                 switch (state) {
                     case 0:
                         if (ch === '"') {
-                            state = 1;
+                            state = 1
                         }
-                        break;
+                        break
                         
                     case 1:
                         if (ch === '"') {
                             if (current === 'speed') {
-                                inSpeedKey = true;
-                                state = 2;
+                                state = 2
                             } else {
-                                state = 0;
+                                state = 0
                             }
-                            current = '';
+                            current = ''
                         } else {
-                            current += ch;
+                            current += ch
                         }
-                        break;
+                        break
                         
                     case 2:
                         if (ch === ':') {
-                            // 跳过冒号后的空格
-                            let j = i + 1;
+                            let j = i + 1
                             while (j < jsonText.length && (jsonText[j] === ' ' || jsonText[j] === '\n' || jsonText[j] === '\t')) {
-                                j++;
+                                j++
                             }
                             
-                            // 读取数字
-                            let numStr = '';
-                            let k = j;
+                            let numStr = ''
+                            let k = j
                             while (k < jsonText.length) {
-                                const c = jsonText[k];
+                                const c = jsonText[k]
                                 if ((c >= '0' && c <= '9') || c === '.' || c === '-') {
-                                    numStr += c;
+                                    numStr += c
                                 } else if (c === ',' || c === '}' || c === ' ' || c === '\n' || c === '\t') {
-                                    break;
+                                    break
                                 }
-                                k++;
+                                k++
                             }
                             
                             if (numStr) {
-                                speedValue = parseFloat(numStr);
-                                return speedValue; // 找到第一个立即返回
+                                speedValue = parseFloat(numStr)
+                                return speedValue
                             }
                             
-                            state = 0;
-                            inSpeedKey = false;
+                            state = 0
                         } else {
-                            // 如果不是冒号，重置状态
-                            state = 0;
-                            inSpeedKey = false;
+                            state = 0
                         }
-                        break;
+                        break
                 }
             }
             
-            return null;
+            return null
         }
         
-        // 严格按照C++逻辑修改speed值
         function modifySpeedWithCppLogic(jsonText, multiplier) {
-            // 状态机实现，完全匹配C++代码逻辑
-            let state = 0;
-            let current = '';
-            let inSpeedKey = false;
-            let result = '';
-            let i = 0;
+            let state = 0
+            let current = ''
+            let result = ''
+            let i = 0
             
             while (i < jsonText.length) {
-                const ch = jsonText[i];
+                const ch = jsonText[i]
                 
                 switch (state) {
                     case 0:
-                        result += ch;
+                        result += ch
                         if (ch === '"') {
-                            state = 1;
+                            state = 1
                         }
-                        break;
+                        break
                         
                     case 1:
-                        result += ch;
+                        result += ch
                         if (ch === '"') {
                             if (current === 'speed') {
-                                inSpeedKey = true;
-                                state = 2;
+                                state = 2
                             } else {
-                                state = 0;
+                                state = 0
                             }
-                            current = '';
+                            current = ''
                         } else {
-                            current += ch;
+                            current += ch
                         }
-                        break;
+                        break
                         
                     case 2:
                         if (ch === ':') {
-                            result += ch;
-                            // 读取数值
-                            let j = i + 1;
+                            result += ch
+                            let j = i + 1
                             while (j < jsonText.length && (jsonText[j] === ' ' || jsonText[j] === '\n' || jsonText[j] === '\t')) {
-                                result += jsonText[j];
-                                j++;
+                                result += jsonText[j]
+                                j++
                             }
                             
-                            // 读取数字字符串
-                            let numStr = '';
-                            let k = j;
+                            let numStr = ''
+                            let k = j
                             while (k < jsonText.length) {
-                                const c = jsonText[k];
+                                const c = jsonText[k]
                                 if ((c >= '0' && c <= '9') || c === '.' || c === '-') {
-                                    numStr += c;
-                                    k++;
+                                    numStr += c
+                                    k++
                                 } else {
-                                    break;
+                                    break
                                 }
                             }
                             
                             if (numStr) {
-                                // 计算新值
-                                const oldValue = parseFloat(numStr);
-                                const newValue = oldValue * multiplier;
-                                result += newValue.toString();
+                                const oldValue = parseFloat(numStr)
+                                const newValue = oldValue * multiplier
+                                result += newValue.toString()
                                 
-                                // 跳过已处理的数字
-                                i = k - 1;
+                                i = k - 1
                                 
-                                // 继续处理后续字符
-                                state = 0;
-                                inSpeedKey = false;
-                                break;
+                                state = 0
+                                break
                             } else {
-                                // 没有找到数字，恢复正常状态
-                                state = 0;
-                                inSpeedKey = false;
-                                result += ch;
+                                state = 0
+                                result += ch
                             }
                         } else if (ch === ',') {
-                            // C++代码中遇到逗号表示结束
-                            result += ch;
-                            state = 0;
-                            inSpeedKey = false;
+                            result += ch
+                            state = 0
                         } else {
-                            result += ch;
+                            result += ch
                         }
-                        break;
+                        break
                 }
                 
-                i++;
+                i++
             }
             
-            return result;
+            return result
         }
         
-        // 更新速度显示
-        function updateSpeed() {
-            speedMultiplier = parseFloat(speedSlider.value);
-            speedValue.textContent = speedMultiplier.toFixed(2) + 'x';
-            multiplierValue.textContent = '×' + speedMultiplier.toFixed(2);
-            
-            const newSpeed = originalSpeed * speedMultiplier;
-            newSpeedSpan.textContent = newSpeed.toFixed(2);
-        }
-        
-        // 开始动画
         function startAnimation() {
-            updateAnimation();
+            updateAnimation()
         }
         
-        // 更新动画
         function updateAnimation() {
-            // 停止当前动画
-            note.classList.remove('animating');
+            note.classList.remove('animating')
             
-            // 计算动画持续时间
-            const baseTime = 2.0; // 1x速度的基础时间
-            const animationTime = baseTime / speedMultiplier;
+            const baseTime = 2.0
+            const animationTime = baseTime / speedMultiplier
             
-            // 立即开始新动画
-            note.style.animation = `fall ${animationTime}s linear infinite`;
-            note.classList.add('animating');
+            note.style.animation = `fall ${animationTime}s linear infinite`
+            note.classList.add('animating')
         }
         
-        // 下载修改后的ZIP
         async function downloadModifiedZip() {
             if (!originalZip || !jsonContent) {
-                showStatus('请先上传ZIP文件', 'error');
-                return;
+                showStatus('请先上传ZIP文件', 'error')
+                return
             }
             
-            downloadBtn.textContent = '处理中...';
-            downloadBtn.disabled = true;
+            downloadBtn.textContent = '处理中...'
+            downloadBtn.disabled = true
             
             try {
-                // 创建ZIP副本
-                const modifiedZip = new JSZip();
+                const modifiedZip = new JSZip()
                 
-                // 复制所有文件
-                const promises = [];
+                const promises = []
                 originalZip.forEach((relativePath, file) => {
                     if (!file.dir) {
                         promises.push(
                             file.async('uint8array').then(content => {
-                                // 如果是找到的JSON文件，则修改
                                 if (relativePath === jsonFileName) {
-                                    const modifiedJson = modifySpeedWithCppLogic(jsonContent, speedMultiplier);
-                                    modifiedZip.file(relativePath, modifiedJson);
+                                    const modifiedJson = modifySpeedWithCppLogic(jsonContent, speedMultiplier)
+                                    modifiedZip.file(relativePath, modifiedJson)
                                 } else {
-                                    modifiedZip.file(relativePath, content);
+                                    modifiedZip.file(relativePath, content)
                                 }
                             })
-                        );
+                        )
                     }
-                });
+                })
                 
-                await Promise.all(promises);
+                await Promise.all(promises)
                 
-                // 生成新的ZIP文件
-                const zipBlob = await modifiedZip.generateAsync({type: 'blob'});
+                const multiplierStr = speedMultiplier.toFixed(2)
+                const downloadFileName = `${originalFileName}_${multiplierStr}x.zip`
                 
-                // 创建下载链接
-                const url = URL.createObjectURL(zipBlob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `phigros_${speedMultiplier.toFixed(2)}x.zip`;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                URL.revokeObjectURL(url);
+                const zipBlob = await modifiedZip.generateAsync({type: 'blob'})
                 
-                showStatus(`下载成功！速度: ${(originalSpeed * speedMultiplier).toFixed(2)}`, 'success');
+                const url = URL.createObjectURL(zipBlob)
+                const a = document.createElement('a')
+                a.href = url
+                a.download = downloadFileName
+                document.body.appendChild(a)
+                a.click()
+                document.body.removeChild(a)
+                URL.revokeObjectURL(url)
+                
+                showStatus(`下载成功: ${downloadFileName}`, 'success')
                 
             } catch (error) {
-                showStatus(`下载失败: ${error.message}`, 'error');
-                console.error(error);
+                showStatus(`下载失败: ${error.message}`, 'error')
+                console.error(error)
             } finally {
-                downloadBtn.textContent = '下载修改后的ZIP文件';
-                downloadBtn.disabled = false;
+                downloadBtn.textContent = '下载修改后的ZIP文件'
+                downloadBtn.disabled = false
             }
         }
         
-        // 显示状态消息
         function showStatus(message, type = 'success') {
-            status.textContent = message;
-            status.className = `status show ${type}`;
+            status.textContent = message
+            status.className = `status show ${type}`
             
             setTimeout(() => {
-                status.classList.remove('show');
-            }, 3000);
+                status.classList.remove('show')
+            }, 3000)
         }
         
-        // 页面加载完成后初始化
         document.addEventListener('DOMContentLoaded', () => {
-            init();
-            downloadBtn.addEventListener('click', downloadModifiedZip);
-        });
+            init()
+            downloadBtn.addEventListener('click', downloadModifiedZip)
+        })
     </script>
 </body>
 </html>
