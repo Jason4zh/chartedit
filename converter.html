@@ -77,6 +77,7 @@
         let jsonFileName = null
         let chartData = null
         let selectedType = 'tap'
+        let originalFileName = '' // 保存原始文件名
         
         const uploadArea = document.getElementById('uploadArea')
         const fileInput = document.getElementById('fileInput')
@@ -156,6 +157,9 @@
                 const arrayBuffer = await file.arrayBuffer()
                 originalZip = await JSZip.loadAsync(arrayBuffer)
                 
+                // 保存原始文件名（去除.zip扩展名）
+                originalFileName = file.name.replace(/\.zip$/i, '')
+                
                 const jsonFiles = []
                 originalZip.forEach((relativePath, fileEntry) => {
                     if (!fileEntry.dir && relativePath.toLowerCase().endsWith('.json')) {
@@ -217,18 +221,22 @@
             convertedData.judgeLineList.forEach(judgeLine => {
                 if (judgeLine.notes && Array.isArray(judgeLine.notes)) {
                     judgeLine.notes.forEach(note => {
-                        const shouldConvert = (note.type !== 3) || includeHold || selectedType === 'hold'
-                        
-                        if (shouldConvert) {
-                            if (selectedType === 'hold') {
-                                note.holdTime = (note.time || 0) + holdMinLength
-                            } else {
-                                if (note.holdTime !== undefined) {
-                                    delete note.holdTime
-                                }
-                            }
-                            note.type = targetTypeValue
+                        // 修复问题2：当不包含Hold按键时，跳过type=3的Hold键
+                        if (note.type === 3 && !includeHold) {
+                            return // 跳过这个Hold键
                         }
+                        
+                        // 修复问题3：选择转tap时，红键(type=4)也应该被转换
+                        // 所有非跳过的按键都应该被转换
+                        if (selectedType === 'hold') {
+                            note.holdTime = (note.time || 0) + holdMinLength
+                        } else {
+                            // 删除holdTime属性（如果存在）
+                            if (note.holdTime !== undefined) {
+                                delete note.holdTime
+                            }
+                        }
+                        note.type = targetTypeValue
                     })
                 }
             })
@@ -282,7 +290,8 @@
                 const url = URL.createObjectURL(zipBlob)
                 const a = document.createElement('a')
                 a.href = url
-                a.download = `converted_${selectedType}.zip`
+                // 修复问题1：使用原始文件名_转换类型.zip的命名方式
+                a.download = `${originalFileName}_${selectedType}.zip`
                 document.body.appendChild(a)
                 a.click()
                 document.body.removeChild(a)
