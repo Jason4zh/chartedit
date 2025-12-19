@@ -1,0 +1,1112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phigros按键转换器</title>
+    <link rel="stylesheet" href="common.css">
+</head>
+<body>
+    <div class="container">
+    <header>
+            <h1>Phigros按键转换器</h1>
+        </header>
+        
+        <div class="main-content">
+            <div class="upload-area" id="uploadArea">
+                <div class="upload-icon">📁</div>
+                <p>上传Phigros谱面ZIP文件</p>
+                <input type="file" id="fileInput" accept=".zip">
+            </div>
+            
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p>处理中...</p>
+            </div>
+            
+            <div class="controls-section" id="controlsSection">
+                <div class="file-info" id="fileInfo">
+                    <div class="info-item">
+                        <span>文件:</span>
+                        <span id="fileName">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span>按键数:</span>
+                        <span id="noteCount">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span>格式:</span>
+                        <span id="chartFormat">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span>formatVersion:</span>
+                        <span id="formatVersion">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span>判定线数:</span>
+                        <span id="judgeLineCount">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span>BPM数量:</span>
+                        <span id="bpmCount">-</span>
+                    </div>
+                </div>
+                
+                <div class="conversion-controls">
+                    <div class="conversion-options">
+                        <button class="conversion-btn" data-type="tap">Tap</button>
+                        <button class="conversion-btn" data-type="drag">Drag</button>
+                        <button class="conversion-btn" data-type="hold">Hold</button>
+                        <button class="conversion-btn" data-type="flick">Flick</button>
+                    </div>
+                    
+                    <div class="hold-controls" id="holdControls">
+                        <div class="hold-option">
+                            <input type="checkbox" id="includeHold" checked>
+                            <label for="includeHold">包含Hold按键</label>
+                        </div>
+                        <div class="hold-length" id="holdLengthControl">
+                            <label>最小长度:</label>
+                            <input type="number" id="holdLength" value="200" min="50" max="1000">
+                            <span>ms</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <button class="download-btn" id="downloadBtn" disabled>
+                    下载转换后的ZIP文件
+                </button>
+                
+                <div class="status" id="status"></div>
+                
+                <!-- 调试信息区域 -->
+                <div class="debug-info" id="debugInfo" style="display: none; margin-top: 20px; padding: 15px; background: #f5f5f5; border-radius: 4px; font-family: monospace; font-size: 12px; max-height: 300px; overflow-y: auto;">
+                    <h4 style="margin-bottom: 10px; margin-top: 0;">调试信息</h4>
+                    <div id="debugContent"></div>
+                </div>
+            </div>
+        </div>
+        
+        <footer>
+            <p>本工具完全在浏览器中运行，不会上传文件到服务器</p>
+        </footer>
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script>
+        let originalZip = null
+        let jsonFileName = null
+        let chartData = null
+        let chartFormat = null // rpe / phi / unknown
+        let selectedType = 'tap'
+        let originalFileName = ''
+        let bpmProcessor = null // BPM处理器实例
+        
+        // 类型映射表（严格按照文档）
+        const TYPE_MAPPING = {
+            // 目标类型 -> 格式对应的数值
+            rpe: {
+                tap: 1,
+                hold: 2,
+                flick: 3,
+                drag: 4
+            },
+            phi: {
+                tap: 1,
+                drag: 2,
+                hold: 3,
+                flick: 4
+            },
+            // 反向映射：数值 -> 类型名称
+            valueToName: {
+                1: 'Tap',
+                2: 'Hold/Raw', // 取决于格式
+                3: 'Flick/Hold', // 取决于格式
+                4: 'Drag/Flick'  // 取决于格式
+            }
+        }
+        
+        // DOM元素
+        const uploadArea = document.getElementById('uploadArea')
+        const fileInput = document.getElementById('fileInput')
+        const loading = document.getElementById('loading')
+        const controlsSection = document.getElementById('controlsSection')
+        const downloadBtn = document.getElementById('downloadBtn')
+        const status = document.getElementById('status')
+        const holdControls = document.getElementById('holdControls')
+        const holdLengthControl = document.getElementById('holdLengthControl')
+        const includeHoldCheck = document.getElementById('includeHold')
+        const holdLengthInput = document.getElementById('holdLength')
+        
+        const fileNameSpan = document.getElementById('fileName')
+        const noteCountSpan = document.getElementById('noteCount')
+        const chartFormatSpan = document.getElementById('chartFormat')
+        const formatVersionSpan = document.getElementById('formatVersion')
+        const judgeLineCountSpan = document.getElementById('judgeLineCount')
+        const bpmCountSpan = document.getElementById('bpmCount')
+        const debugInfo = document.getElementById('debugInfo')
+        const debugContent = document.getElementById('debugContent')
+        
+        // BPM处理器类（实现文档中的时间转换逻辑）
+        class BPMProcessor {
+            constructor(format, bpmList, judgeLineList) {
+                this.format = format
+                this.bpmList = this.parseBPMList(bpmList)
+                this.judgeLineList = judgeLineList || []
+                this.debugLog = []
+            }
+            
+            // 解析BPMList（兼容RPE格式）
+            parseBPMList(bpmList) {
+                if (!bpmList || !Array.isArray(bpmList)) {
+                    this.debugLog.push('BPMList不存在或格式错误，使用默认BPM')
+                    return [{
+                        startTime: this.parseBeat([0, 0, 1]), // 0拍
+                        bpm: 120.0
+                    }]
+                }
+                
+                const parsed = []
+                bpmList.forEach((item, index) => {
+                    try {
+                        let startTime = item.startTime
+                        // 解析RPE的beat格式（int[3]）
+                        if (Array.isArray(startTime) && startTime.length === 3) {
+                            startTime = this.parseBeat(startTime)
+                        } else if (typeof startTime === 'object' && startTime.value !== undefined) {
+                            startTime = startTime.value // 兼容可能的对象格式
+                        } else if (typeof startTime !== 'number') {
+                            startTime = 0
+                        }
+                        
+                        parsed.push({
+                            startTime: startTime,
+                            bpm: parseFloat(item.bpm) || 120.0
+                        })
+                    } catch (e) {
+                        this.debugLog.push(`解析BPM事件${index}失败: ${e.message}`)
+                    }
+                })
+                
+                // 排序并去重
+                parsed.sort((a, b) => a.startTime - b.startTime)
+                const uniqueBPMs = []
+                parsed.forEach(item => {
+                    if (uniqueBPMs.length === 0 || item.startTime !== uniqueBPMs[uniqueBPMs.length - 1].startTime) {
+                        uniqueBPMs.push(item)
+                    }
+                })
+                
+                this.debugLog.push(`解析完成${uniqueBPMs.length}个BPM事件`)
+                return uniqueBPMs
+            }
+            
+            // 解析RPE的beat格式 [0]:[1]/[2] -> 数值
+            parseBeat(beatArray) {
+                if (!Array.isArray(beatArray) || beatArray.length !== 3) {
+                    throw new Error(`无效的beat格式: ${JSON.stringify(beatArray)}`)
+                }
+                const [bar, beat, denom] = beatArray
+                return bar + (beat / denom)
+            }
+            
+            // 将beat转换为秒（实现文档中的beat2sec）
+            beat2sec(t, judgeLineIndex = 0) {
+                if (this.format !== 'rpe') {
+                    return t // 非RPE格式直接返回
+                }
+                
+                let sec = 0.0
+                const judgeLine = this.judgeLineList[judgeLineIndex] || {}
+                const bpmfactor = parseFloat(judgeLine.bpmfactor) || 1.0
+                
+                for (let i = 0; i < this.bpmList.length; i++) {
+                    const e = this.bpmList[i]
+                    const bpmv = e.bpm / bpmfactor
+                    
+                    if (i !== this.bpmList.length - 1) {
+                        const et_beat = this.bpmList[i + 1].startTime - e.startTime
+                        
+                        if (t >= et_beat) {
+                            sec += et_beat * (60 / bpmv)
+                            t -= et_beat
+                        } else {
+                            sec += t * (60 / bpmv)
+                            break
+                        }
+                    } else {
+                        sec += t * (60 / bpmv)
+                        break
+                    }
+                }
+                
+                return sec
+            }
+            
+            // 将秒转换为beat（实现文档中的sec2beat）
+            sec2beat(t, judgeLineIndex = 0) {
+                if (this.format !== 'rpe') {
+                    return t // 非RPE格式直接返回
+                }
+                
+                let beat = 0.0
+                const judgeLine = this.judgeLineList[judgeLineIndex] || {}
+                const bpmfactor = parseFloat(judgeLine.bpmfactor) || 1.0
+                
+                for (let i = 0; i < this.bpmList.length; i++) {
+                    const e = this.bpmList[i]
+                    const bpmv = e.bpm / bpmfactor
+                    
+                    if (i !== this.bpmList.length - 1) {
+                        const et_beat = this.bpmList[i + 1].startTime - e.startTime
+                        const et_sec = et_beat * (60 / bpmv)
+                        
+                        if (t >= et_sec) {
+                            beat += et_beat
+                            t -= et_sec
+                        } else {
+                            beat += t / (60 / bpmv)
+                            break
+                        }
+                    } else {
+                        beat += t / (60 / bpmv)
+                        break
+                    }
+                }
+                
+                return beat
+            }
+            
+            // 解析音符的时间（兼容两种格式）
+            parseNoteTime(note, judgeLineIndex = 0) {
+                if (this.format === 'rpe') {
+                    // RPE格式：startTime和endTime是beat
+                    let startTime = note.startTime
+                    let endTime = note.endTime
+                    
+                    // 解析beat格式
+                    if (Array.isArray(startTime)) startTime = this.parseBeat(startTime)
+                    if (Array.isArray(endTime)) endTime = this.parseBeat(endTime)
+                    
+                    // 转换为秒
+                    const startSec = this.beat2sec(startTime, judgeLineIndex)
+                    const endSec = this.beat2sec(endTime, judgeLineIndex)
+                    
+                    return {
+                        startSec,
+                        endSec,
+                        durationSec: endSec - startSec,
+                        startTimeBeat: startTime,
+                        endTimeBeat: endTime
+                    }
+                } else if (this.format === 'phi') {
+                    // 官方格式：time单位是1.875/bpm，holdTime同单位
+                    const noteTime = parseFloat(note.time) || 0
+                    const holdTime = parseFloat(note.holdTime) || 0
+                    
+                    // 转换为秒（假设BPM=120作为基准，实际使用时根据BPM调整）
+                    // 官方格式的时间单位是相对的，这里简化处理
+                    const bpm = this.bpmList[0]?.bpm || 120
+                    const secPerUnit = 1.875 / bpm
+                    const startSec = noteTime * secPerUnit
+                    const endSec = startSec + (holdTime * secPerUnit)
+                    
+                    return {
+                        startSec,
+                        endSec,
+                        durationSec: endSec - startSec,
+                        timeUnit: noteTime,
+                        holdTimeUnit: holdTime
+                    }
+                }
+                
+                return { startSec: 0, endSec: 0, durationSec: 0 }
+            }
+            
+            getDebugLog() {
+                return this.debugLog
+            }
+        }
+        
+        function init() {
+            // 初始化事件监听
+            uploadArea.addEventListener('click', () => fileInput.click())
+            
+            uploadArea.addEventListener('dragover', (e) => {
+                e.preventDefault()
+                uploadArea.style.borderColor = '#3498db'
+            })
+            
+            uploadArea.addEventListener('dragleave', () => {
+                uploadArea.style.borderColor = '#bdc3c7'
+            })
+            
+            uploadArea.addEventListener('drop', (e) => {
+                e.preventDefault()
+                uploadArea.style.borderColor = '#bdc3c7'
+                if (e.dataTransfer.files.length) {
+                    handleFileUpload(e.dataTransfer.files[0])
+                }
+            })
+            
+            fileInput.addEventListener('change', (e) => {
+                if (e.target.files.length) {
+                    handleFileUpload(e.target.files[0])
+                }
+            })
+            
+            // 转换类型选择
+            document.querySelectorAll('.conversion-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    document.querySelectorAll('.conversion-btn').forEach(b => b.classList.remove('selected'))
+                    this.classList.add('selected')
+                    selectedType = this.dataset.type
+                    
+                    // 显示/隐藏Hold相关控制
+                    if (selectedType === 'hold') {
+                        holdLengthControl.style.display = 'flex'
+                        includeHoldCheck.style.display = 'none'
+                    } else {
+                        holdLengthControl.style.display = 'none'
+                        includeHoldCheck.style.display = 'flex'
+                    }
+                })
+            })
+            
+            document.querySelector('.conversion-btn[data-type="tap"]').click()
+            downloadBtn.addEventListener('click', downloadConvertedZip)
+        }
+        
+        /**
+         * 严格的格式判断逻辑（基于文档）
+         */
+        function determineChartFormat(data) {
+            const log = []
+            
+            // 1. 官方格式判断（phi）
+            if (data.formatVersion) {
+                const versionStr = data.formatVersion.toString().toLowerCase()
+                log.push(`formatVersion: ${data.formatVersion}`)
+                
+                if (versionStr.startsWith('phi-')) {
+                    log.push('✓ formatVersion以"phi-"开头 → 官方格式')
+                    showDebugInfo('格式判断', log)
+                    return 'phi'
+                }
+            }
+            
+            // 2. RPE格式判断
+            if (data.BPMList && Array.isArray(data.BPMList)) {
+                log.push(`✓ 找到BPMList（RPE核心字段），长度: ${data.BPMList.length}`)
+                
+                if (data.judgeLineList && Array.isArray(data.judgeLineList)) {
+                    const firstLine = data.judgeLineList[0]
+                    if (firstLine && (firstLine.notesAbove || firstLine.notesBelow)) {
+                        log.push('✓ judgeLineList包含notesAbove/notesBelow → RPE格式')
+                        showDebugInfo('格式判断', log)
+                        return 'rpe'
+                    } else {
+                        log.push('✗ judgeLineList不包含notesAbove/notesBelow')
+                    }
+                } else {
+                    log.push('✗ 未找到judgeLineList')
+                }
+            } else {
+                log.push('✗ 未找到BPMList（RPE核心字段）')
+            }
+            
+            // 3. 补充判断
+            if (data.noteList && Array.isArray(data.noteList)) {
+                log.push(`✓ 找到noteList（官方格式核心字段），长度: ${data.noteList.length}`)
+                log.push('→ 判定为官方格式(phi)')
+                showDebugInfo('格式判断', log)
+                return 'phi'
+            }
+            
+            log.push('→ 无法明确判定格式')
+            showDebugInfo('格式判断', log)
+            return 'unknown'
+        }
+        
+        async function handleFileUpload(file) {
+            if (!file.name.toLowerCase().endsWith('.zip')) {
+                showStatus('请上传ZIP文件', 'error')
+                return
+            }
+            
+            loading.classList.add('show')
+            debugContent.innerHTML = ''
+            
+            try {
+                // 读取ZIP文件
+                const arrayBuffer = await file.arrayBuffer()
+                originalZip = await JSZip.loadAsync(arrayBuffer)
+                originalFileName = file.name.replace(/\.zip$/i, '')
+                
+                // 查找谱面JSON文件
+                const jsonFiles = []
+                originalZip.forEach((relativePath, fileEntry) => {
+                    if (!fileEntry.dir && relativePath.toLowerCase().endsWith('.json')) {
+                        jsonFiles.push(relativePath)
+                    }
+                })
+                
+                if (jsonFiles.length === 0) {
+                    throw new Error('ZIP文件中未找到JSON文件')
+                }
+                
+                // 优先选择常见的谱面文件名
+                const chartFileNames = ['chart.json', 'level.json', 'data.json', 'song.json']
+                let possibleChartFile = null
+                for (const name of chartFileNames) {
+                    possibleChartFile = jsonFiles.find(path => path.toLowerCase().includes(name))
+                    if (possibleChartFile) break
+                }
+                jsonFileName = possibleChartFile || jsonFiles[0]
+                
+                // 读取JSON文件
+                const jsonFile = originalZip.file(jsonFileName)
+                if (!jsonFile) {
+                    throw new Error(`无法读取JSON文件: ${jsonFileName}`)
+                }
+                
+                const jsonText = await jsonFile.async('text')
+                chartData = JSON.parse(jsonText)
+                
+                // 判定格式
+                chartFormat = determineChartFormat(chartData)
+                if (chartFormat === 'unknown') {
+                    throw new Error('无法识别的谱面格式，请使用标准的RPE或官方phi格式')
+                }
+                
+                // 初始化BPM处理器
+                bpmProcessor = new BPMProcessor(
+                    chartFormat,
+                    chartData.BPMList,
+                    chartData.judgeLineList
+                )
+                
+                // 解析谱面信息
+                const noteCount = countNotes(chartData, chartFormat)
+                const judgeLineCount = getJudgeLineCount(chartData, chartFormat)
+                const bpmCount = bpmProcessor.bpmList.length
+                
+                // 更新UI显示
+                fileNameSpan.textContent = file.name
+                noteCountSpan.textContent = noteCount
+                chartFormatSpan.textContent = chartFormat === 'rpe' ? 'RPE' : '官方格式(phi)'
+                formatVersionSpan.textContent = chartData.formatVersion || '未知'
+                judgeLineCountSpan.textContent = judgeLineCount
+                bpmCountSpan.textContent = bpmCount
+                
+                // 显示调试信息
+                showDebugInfo('文件加载成功', [
+                    `文件名: ${file.name}`,
+                    `JSON文件路径: ${jsonFileName}`,
+                    `谱面格式: ${chartFormat === 'rpe' ? 'RPE' : '官方格式(phi)'}`,
+                    `formatVersion: ${chartData.formatVersion || '无'}`,
+                    `判定线数量: ${judgeLineCount}`,
+                    `BPM事件数量: ${bpmCount}`,
+                    `总按键数: ${noteCount}`,
+                    `数据大小: ${jsonText.length} 字符`
+                ])
+                
+                // 显示BPM信息
+                showDebugInfo('BPM信息', [
+                    'BPM事件列表:',
+                    ...bpmProcessor.bpmList.map((item, i) => 
+                        `  [${i}] 起始拍: ${item.startTime.toFixed(2)}, BPM: ${item.bpm.toFixed(1)}`
+                    ),
+                    ...bpmProcessor.getDebugLog()
+                ])
+                
+                // 分析谱面结构
+                analyzeChartStructure(chartData, chartFormat)
+                
+                // 显示控制区域
+                controlsSection.classList.add('show')
+                debugInfo.style.display = 'block'
+                downloadBtn.disabled = false
+                
+                showStatus('成功加载谱面', 'success')
+                
+            } catch (error) {
+                showStatus(`处理失败: ${error.message}`, 'error')
+                showDebugInfo('加载错误', [
+                    `错误信息: ${error.message}`,
+                    `JSON文件: ${jsonFileName || '未找到'}`,
+                    `可用JSON文件: ${jsonFiles.join(', ')}`,
+                    `错误堆栈: ${error.stack ? error.stack.substring(0, 500) + '...' : '无'}`
+                ])
+            } finally {
+                loading.classList.remove('show')
+            }
+        }
+        
+        /**
+         * 计数音符（兼容两种格式）
+         */
+        function countNotes(chartData, format) {
+            if (format === 'rpe') {
+                let count = 0
+                if (chartData.judgeLineList && Array.isArray(chartData.judgeLineList)) {
+                    chartData.judgeLineList.forEach(line => {
+                        if (line.notesAbove && Array.isArray(line.notesAbove)) {
+                            // 过滤假音符（isFake=1）
+                            count += line.notesAbove.filter(note => note.isFake !== 1).length
+                        }
+                        if (line.notesBelow && Array.isArray(line.notesBelow)) {
+                            count += line.notesBelow.filter(note => note.isFake !== 1).length
+                        }
+                    })
+                }
+                return count
+            } else if (format === 'phi') {
+                return chartData.noteList && Array.isArray(chartData.noteList) 
+                    ? chartData.noteList.length 
+                    : 0
+            }
+            return 0
+        }
+        
+        /**
+         * 获取判定线数量
+         */
+        function getJudgeLineCount(chartData, format) {
+            if (chartData.judgeLineList && Array.isArray(chartData.judgeLineList)) {
+                return chartData.judgeLineList.length
+            }
+            if (format === 'phi' && chartData.noteList && Array.isArray(chartData.noteList)) {
+                return 1 // 官方格式默认1条判定线
+            }
+            return 0
+        }
+        
+        /**
+         * 分析谱面结构
+         */
+        function analyzeChartStructure(chartData, format) {
+            const structureInfo = []
+            
+            if (format === 'rpe') {
+                structureInfo.push('=== RPE格式谱面结构分析（按文档标准） ===')
+                structureInfo.push('核心特征：BPMList + judgeLineList(notesAbove/notesBelow)')
+                structureInfo.push('音符时间单位：beat ([0]:[1]/[2])')
+                structureInfo.push('音符类型映射：1=Tap, 2=Hold, 3=Flick, 4=Drag')
+                structureInfo.push('')
+                
+                // 检查核心字段
+                structureInfo.push('核心字段检查:')
+                structureInfo.push(`  BPMList: ${chartData.BPMList ? '存在' : '不存在'} (${chartData.BPMList?.length || 0}个事件)`)
+                structureInfo.push(`  judgeLineList: ${chartData.judgeLineList ? '存在' : '不存在'} (${chartData.judgeLineList?.length || 0}条线)`)
+                structureInfo.push('')
+                
+                // 分析每条判定线
+                if (chartData.judgeLineList && Array.isArray(chartData.judgeLineList)) {
+                    chartData.judgeLineList.forEach((line, lineIndex) => {
+                        structureInfo.push(`判定线 ${lineIndex + 1}:`)
+                        structureInfo.push(`  ID: ${line.id || '无'}`)
+                        structureInfo.push(`  bpmfactor: ${line.bpmfactor || 1.0}`)
+                        structureInfo.push(`  可见性: ${line.visible !== undefined ? line.visible : '默认可见'}`)
+                        
+                        // 分析notesAbove
+                        if (line.notesAbove && Array.isArray(line.notesAbove)) {
+                            const noteTypes = countNoteTypes(line.notesAbove, format)
+                            structureInfo.push(`  notesAbove: ${line.notesAbove.length} 个音符`)
+                            for (const [type, count] of Object.entries(noteTypes)) {
+                                structureInfo.push(`    - ${getTypeName(type, format)}: ${count} 个`)
+                            }
+                            
+                            // 分析前2个音符的详细信息
+                            const sampleNotes = line.notesAbove.slice(0, 2)
+                            sampleNotes.forEach((note, i) => {
+                                const timeInfo = bpmProcessor.parseNoteTime(note, lineIndex)
+                                structureInfo.push(`    音符 ${i+1} 详情:`)
+                                structureInfo.push(`      类型: ${getTypeName(note.type, format)} (${note.type})`)
+                                structureInfo.push(`      时间: ${JSON.stringify(note.startTime)} → ${JSON.stringify(note.endTime)}`)
+                                structureInfo.push(`      时长: ${timeInfo.durationSec.toFixed(3)}s`)
+                                structureInfo.push(`      位置X: ${note.positionX || 0}`)
+                                structureInfo.push(`      颜色: ${note.tint || note.color || '[255,255,255]'}`)
+                                structureInfo.push(`      假音符: ${note.isFake === 1 ? '是' : '否'}`)
+                            })
+                        } else {
+                            structureInfo.push(`  notesAbove: 无`)
+                        }
+                        
+                        // 分析notesBelow
+                        if (line.notesBelow && Array.isArray(line.notesBelow)) {
+                            const noteTypes = countNoteTypes(line.notesBelow, format)
+                            structureInfo.push(`  notesBelow: ${line.notesBelow.length} 个音符`)
+                            for (const [type, count] of Object.entries(noteTypes)) {
+                                structureInfo.push(`    - ${getTypeName(type, format)}: ${count} 个`)
+                            }
+                        } else {
+                            structureInfo.push(`  notesBelow: 无`)
+                        }
+                        
+                        structureInfo.push('')
+                    })
+                }
+                
+            } else if (format === 'phi') {
+                structureInfo.push('=== 官方格式(phi)谱面结构分析（按文档标准） ===')
+                structureInfo.push('核心特征：formatVersion + noteList')
+                structureInfo.push('音符时间单位：1.875/bpm')
+                structureInfo.push('音符类型映射：1=Tap, 2=Drag, 3=Hold, 4=Flick')
+                structureInfo.push('')
+                
+                // 检查核心字段
+                structureInfo.push('核心字段检查:')
+                structureInfo.push(`  formatVersion: ${chartData.formatVersion || '无'}`)
+                structureInfo.push(`  noteList: ${chartData.noteList ? '存在' : '不存在'} (${chartData.noteList?.length || 0}个音符)`)
+                structureInfo.push(`  judgeLineList: ${chartData.judgeLineList ? '存在' : '不存在'} (${chartData.judgeLineList?.length || 0}条线)`)
+                structureInfo.push('')
+                
+                // 分析音符列表
+                if (chartData.noteList && Array.isArray(chartData.noteList)) {
+                    const noteTypes = countNoteTypes(chartData.noteList, format)
+                    structureInfo.push('音符类型分布:')
+                    for (const [type, count] of Object.entries(noteTypes)) {
+                        structureInfo.push(`  - ${getTypeName(type, format)}: ${count} 个 (${(count/chartData.noteList.length*100).toFixed(1)}%)`)
+                    }
+                    structureInfo.push('')
+                    
+                    // 分析前2个音符的详细信息
+                    const sampleNotes = chartData.noteList.slice(0, 2)
+                    sampleNotes.forEach((note, i) => {
+                        const timeInfo = bpmProcessor.parseNoteTime(note)
+                        structureInfo.push(`音符 ${i+1} 详情:`)
+                        structureInfo.push(`  类型: ${getTypeName(note.type, format)} (${note.type})`)
+                        structureInfo.push(`  时间: ${note.time.toFixed(3)} (${timeInfo.startSec.toFixed(3)}s)`)
+                        structureInfo.push(`  持续时间: ${note.holdTime.toFixed(3)} (${timeInfo.durationSec.toFixed(3)}s)`)
+                        structureInfo.push(`  位置X: ${note.positionX || 0}`)
+                        structureInfo.push(`  速度: ${note.speed || 1.0}`)
+                        structureInfo.push(`  判定线: ${note.judgeLine || 0}`)
+                        structureInfo.push('')
+                    })
+                }
+            }
+            
+            showDebugInfo('谱面结构分析', structureInfo)
+        }
+        
+        /**
+         * 统计音符类型分布
+         */
+        function countNoteTypes(notesArray, format) {
+            const count = {}
+            notesArray.forEach(note => {
+                const type = note.type || 0
+                count[type] = (count[type] || 0) + 1
+            })
+            return count
+        }
+        
+        /**
+         * 获取音符类型名称（兼容两种格式）
+         */
+        function getTypeName(type, format) {
+            type = parseInt(type) || 0
+            if (format === 'rpe') {
+                switch(type) {
+                    case 1: return 'Tap'
+                    case 2: return 'Hold'
+                    case 3: return 'Flick'
+                    case 4: return 'Drag'
+                    default: return `未知(${type})`
+                }
+            } else if (format === 'phi') {
+                switch(type) {
+                    case 1: return 'Tap'
+                    case 2: return 'Drag'
+                    case 3: return 'Hold'
+                    case 4: return 'Flick'
+                    default: return `未知(${type})`
+                }
+            }
+            return TYPE_MAPPING.valueToName[type] || `未知(${type})`
+        }
+        
+        /**
+         * 转换谱面数据（核心逻辑）
+         */
+        function convertChartData() {
+            if (!chartData || !chartFormat || !bpmProcessor) return null
+            
+            const convertedData = JSON.parse(JSON.stringify(chartData))
+            const targetType = TYPE_MAPPING[chartFormat][selectedType]
+            const includeHold = includeHoldCheck.checked
+            const holdMinLengthMs = parseInt(holdLengthInput.value) || 200
+            const holdMinLengthSec = holdMinLengthMs / 1000
+            
+            let totalConverted = 0
+            let totalSkipped = 0
+            const conversionLog = []
+            
+            conversionLog.push(`=== 开始转换 ===`)
+            conversionLog.push(`目标类型: ${selectedType} (${targetType})`)
+            conversionLog.push(`包含Hold: ${includeHold}`)
+            conversionLog.push(`Hold最小长度: ${holdMinLengthMs}ms (${holdMinLengthSec}s)`)
+            conversionLog.push(`谱面格式: ${chartFormat}`)
+            conversionLog.push('')
+            
+            if (chartFormat === 'rpe') {
+                // RPE格式转换：处理每条判定线的notesAbove/notesBelow
+                if (!convertedData.judgeLineList || !Array.isArray(convertedData.judgeLineList)) {
+                    conversionLog.push('❌ 错误：未找到judgeLineList')
+                    showDebugInfo('转换日志', conversionLog)
+                    return convertedData
+                }
+                
+                convertedData.judgeLineList.forEach((judgeLine, lineIndex) => {
+                    conversionLog.push(`处理判定线 ${lineIndex + 1}:`)
+                    
+                    // 处理notesAbove
+                    if (judgeLine.notesAbove && Array.isArray(judgeLine.notesAbove)) {
+                        conversionLog.push(`  处理notesAbove (${judgeLine.notesAbove.length}个音符)`)
+                        const { converted, skipped } = processRPENotes(
+                            judgeLine.notesAbove, 
+                            targetType, 
+                            includeHold, 
+                            holdMinLengthSec, 
+                            lineIndex,
+                            conversionLog
+                        )
+                        totalConverted += converted
+                        totalSkipped += skipped
+                    } else {
+                        conversionLog.push(`  无notesAbove`)
+                    }
+                    
+                    // 处理notesBelow
+                    if (judgeLine.notesBelow && Array.isArray(judgeLine.notesBelow)) {
+                        conversionLog.push(`  处理notesBelow (${judgeLine.notesBelow.length}个音符)`)
+                        const { converted, skipped } = processRPENotes(
+                            judgeLine.notesBelow, 
+                            targetType, 
+                            includeHold, 
+                            holdMinLengthSec, 
+                            lineIndex,
+                            conversionLog
+                        )
+                        totalConverted += converted
+                        totalSkipped += skipped
+                    } else {
+                        conversionLog.push(`  无notesBelow`)
+                    }
+                    
+                    conversionLog.push('')
+                })
+                
+            } else if (chartFormat === 'phi') {
+                // 官方格式转换：处理noteList
+                if (!convertedData.noteList || !Array.isArray(convertedData.noteList)) {
+                    conversionLog.push('❌ 错误：未找到noteList')
+                    showDebugInfo('转换日志', conversionLog)
+                    return convertedData
+                }
+                
+                conversionLog.push(`处理noteList (${convertedData.noteList.length}个音符)`)
+                const { converted, skipped } = processPhiNotes(
+                    convertedData.noteList,
+                    targetType,
+                    includeHold,
+                    holdMinLengthSec,
+                    conversionLog
+                )
+                totalConverted += converted
+                totalSkipped += skipped
+            }
+            
+            // 转换统计
+            conversionLog.push(`=== 转换完成 ===`)
+            conversionLog.push(`总计：转换${totalConverted}个音符，跳过${totalSkipped}个音符`)
+            
+            // 更新总音符数（如果存在）
+            if (convertedData.numOfNotes !== undefined) {
+                convertedData.numOfNotes = totalConverted + totalSkipped
+                conversionLog.push(`更新numOfNotes: ${convertedData.numOfNotes}`)
+            }
+            
+            showDebugInfo('转换日志', conversionLog)
+            return convertedData
+        }
+        
+        /**
+         * 处理RPE格式音符
+         */
+        function processRPENotes(notesArray, targetType, includeHold, holdMinLengthSec, lineIndex, log) {
+            let converted = 0
+            let skipped = 0
+            
+            notesArray.forEach((note, index) => {
+                // 跳过假音符
+                if (note.isFake === 1) {
+                    skipped++
+                    if (index < 2) log.push(`  跳过假音符 ${index+1}`)
+                    return
+                }
+                
+                const originalType = note.type || 1
+                const timeInfo = bpmProcessor.parseNoteTime(note, lineIndex)
+                
+                // 规则1：未勾选包含Hold，且原类型是Hold（2）→ 跳过
+                if (originalType === 2 && !includeHold) {
+                    skipped++
+                    if (index < 2) log.push(`  跳过Hold音符 ${index+1} (保留原类型)`)
+                    return
+                }
+                
+                // 规则2：已经是目标类型 → 跳过
+                if (originalType === targetType) {
+                    return
+                }
+                
+                // 规则3：转换为目标类型
+                converted++
+                const originalTypeName = getTypeName(originalType, 'rpe')
+                const targetTypeName = getTypeName(targetType, 'rpe')
+                
+                // 记录转换信息
+                if (index < 2) {
+                    log.push(`  音符 ${index+1}: ${originalTypeName}(${originalType}) → ${targetTypeName}(${targetType})`)
+                    log.push(`    原时间: ${timeInfo.startTimeBeat.toFixed(2)} → ${timeInfo.endTimeBeat.toFixed(2)} (${timeInfo.durationSec.toFixed(3)}s)`)
+                }
+                
+                // 修改类型
+                note.type = targetType
+                
+                // 处理Hold相关属性
+                if (targetType === 2) { // 转换为Hold
+                    // 设置endTime（基于最小长度）
+                    const minEndBeat = bpmProcessor.sec2beat(
+                        timeInfo.startSec + holdMinLengthSec,
+                        lineIndex
+                    )
+                    note.startTime = Array.isArray(note.startTime) ? note.startTime : [0, Math.round(timeInfo.startTimeBeat * 48), 48]
+                    note.endTime = [0, Math.round(minEndBeat * 48), 48]
+                    
+                    // 确保Hold的必要属性
+                    if (note.above === undefined) note.above = 1
+                    if (note.visibleTime === undefined) note.visibleTime = 999999.0
+                    
+                    if (index < 2) {
+                        log.push(`    新时间: ${timeInfo.startTimeBeat.toFixed(2)} → ${minEndBeat.toFixed(2)} (${holdMinLengthSec}s)`)
+                    }
+                } else { // 转换为非Hold类型
+                    // 统一startTime和endTime
+                    note.endTime = note.startTime
+                    // 移除Hold相关属性（如果存在）
+                    if (note.hasOwnProperty('holdTime')) delete note.holdTime
+                }
+                
+                // 保留原有字段（兼容tint/color等）
+                if (note.color && !note.tint) note.tint = note.color
+            })
+            
+            log.push(`  结果：转换${converted}个，跳过${skipped}个`)
+            return { converted, skipped }
+        }
+        
+        /**
+         * 处理官方格式音符
+         */
+        function processPhiNotes(notesArray, targetType, includeHold, holdMinLengthSec, log) {
+            let converted = 0
+            let skipped = 0
+            
+            // 官方格式的BPM（用于时间转换）
+            const bpm = bpmProcessor.bpmList[0]?.bpm || 120
+            const secPerUnit = 1.875 / bpm
+            const minHoldUnits = holdMinLengthSec / secPerUnit
+            
+            notesArray.forEach((note, index) => {
+                const originalType = note.type || 1
+                const timeInfo = bpmProcessor.parseNoteTime(note)
+                
+                // 规则1：未勾选包含Hold，且原类型是Hold（3）→ 跳过
+                if (originalType === 3 && !includeHold) {
+                    skipped++
+                    if (index < 2) log.push(`  跳过Hold音符 ${index+1} (保留原类型)`)
+                    return
+                }
+                
+                // 规则2：已经是目标类型 → 跳过
+                if (originalType === targetType) {
+                    return
+                }
+                
+                // 规则3：转换为目标类型
+                converted++
+                const originalTypeName = getTypeName(originalType, 'phi')
+                const targetTypeName = getTypeName(targetType, 'phi')
+                
+                // 记录转换信息
+                if (index < 2) {
+                    log.push(`  音符 ${index+1}: ${originalTypeName}(${originalType}) → ${targetTypeName}(${targetType})`)
+                    log.push(`    原时间: ${note.time.toFixed(3)} (${timeInfo.startSec.toFixed(3)}s)，原持续: ${note.holdTime.toFixed(3)}`)
+                }
+                
+                // 修改类型
+                note.type = targetType
+                
+                // 处理Hold相关属性
+                if (targetType === 3) { // 转换为Hold
+                    note.holdTime = minHoldUnits
+                    if (index < 2) {
+                        log.push(`    新持续: ${minHoldUnits.toFixed(3)} (${holdMinLengthSec}s)`)
+                    }
+                } else { // 转换为非Hold类型
+                    note.holdTime = 0.0
+                }
+                
+                // 保留原有字段
+                if (note.positionX === undefined) note.positionX = 0
+                if (note.speed === undefined) note.speed = 1.0
+            })
+            
+            log.push(`  结果：转换${converted}个，跳过${skipped}个`)
+            return { converted, skipped }
+        }
+        
+        /**
+         * 下载转换后的ZIP文件
+         */
+        async function downloadConvertedZip() {
+            if (!originalZip || !chartData) {
+                showStatus('请先上传ZIP文件', 'error')
+                return
+            }
+            
+            downloadBtn.textContent = '处理中...'
+            downloadBtn.disabled = true
+            
+            try {
+                // 执行转换
+                const convertedData = convertChartData()
+                if (!convertedData) {
+                    throw new Error('谱面转换失败')
+                }
+                
+                // 验证转换结果
+                const validationLog = [`=== 转换结果验证 ===`]
+                const finalNoteCount = countNotes(convertedData, chartFormat)
+                validationLog.push(`格式: ${chartFormat === 'rpe' ? 'RPE' : '官方格式(phi)'}`)
+                validationLog.push(`转换后总音符数: ${finalNoteCount}`)
+                validationLog.push(`目标类型: ${selectedType} (${TYPE_MAPPING[chartFormat][selectedType]})`)
+                validationLog.push('')
+                
+                // 检查转换后的类型分布
+                if (chartFormat === 'rpe' && convertedData.judgeLineList && convertedData.judgeLineList[0]) {
+                    const firstLine = convertedData.judgeLineList[0]
+                    const notes = firstLine.notesAbove || firstLine.notesBelow || []
+                    if (notes.length > 0) {
+                        const typeCount = countNoteTypes(notes.slice(0, 50), chartFormat)
+                        validationLog.push('前50个音符类型分布:')
+                        for (const [type, count] of Object.entries(typeCount)) {
+                            validationLog.push(`  ${getTypeName(type, chartFormat)}: ${count} 个`)
+                        }
+                    }
+                } else if (chartFormat === 'phi' && convertedData.noteList && convertedData.noteList.length > 0) {
+                    const typeCount = countNoteTypes(convertedData.noteList.slice(0, 50), chartFormat)
+                    validationLog.push('前50个音符类型分布:')
+                    for (const [type, count] of Object.entries(typeCount)) {
+                        validationLog.push(`  ${getTypeName(type, chartFormat)}: ${count} 个`)
+                    }
+                }
+                
+                showDebugInfo('转换验证', validationLog)
+                
+                // 生成新ZIP文件
+                const modifiedZip = new JSZip()
+                
+                // 复制原有文件并替换谱面JSON
+                const promises = []
+                originalZip.forEach((relativePath, file) => {
+                    if (!file.dir) {
+                        promises.push(
+                            file.async('uint8array').then(content => {
+                                if (relativePath === jsonFileName) {
+                                    // 替换为转换后的JSON
+                                    modifiedZip.file(relativePath, JSON.stringify(convertedData, null, 2))
+                                } else {
+                                    // 其他文件原样保留
+                                    modifiedZip.file(relativePath, content)
+                                }
+                            })
+                        )
+                    }
+                })
+                
+                await Promise.all(promises)
+                
+                // 生成ZIP Blob
+                const zipBlob = await modifiedZip.generateAsync({
+                    type: 'blob',
+                    compression: "DEFLATE",
+                    compressionOptions: { level: 6 }
+                })
+                
+                // 下载文件
+                const url = URL.createObjectURL(zipBlob)
+                const a = document.createElement('a')
+                a.href = url
+                a.download = `${originalFileName}_${selectedType}_${chartFormat.toUpperCase()}.zip`
+                document.body.appendChild(a)
+                a.click()
+                document.body.removeChild(a)
+                URL.revokeObjectURL(url)
+                
+                showStatus(`下载成功！转换后共${finalNoteCount}个音符`, 'success')
+                
+            } catch (error) {
+                showStatus(`下载失败: ${error.message}`, 'error')
+                showDebugInfo('下载错误', [
+                    `错误信息: ${error.message}`,
+                    `错误堆栈: ${error.stack ? error.stack.substring(0, 500) + '...' : '无'}`
+                ])
+            } finally {
+                downloadBtn.textContent = '下载转换后的ZIP文件'
+                downloadBtn.disabled = false
+            }
+        }
+        
+        /**
+         * 显示调试信息
+         */
+        function showDebugInfo(title, content) {
+            const timeStr = new Date().toLocaleTimeString()
+            const section = document.createElement('div')
+            section.style.marginBottom = '15px'
+            section.innerHTML = `<strong>${timeStr} - ${title}:</strong><br>`
+            
+            if (Array.isArray(content)) {
+                content.forEach(line => {
+                    section.innerHTML += line + '<br>'
+                })
+            } else if (typeof content === 'object') {
+                for (const [key, value] of Object.entries(content)) {
+                    section.innerHTML += `${key}: ${value}<br>`
+                }
+            } else {
+                section.innerHTML += content
+            }
+            
+            debugContent.appendChild(section)
+            debugInfo.scrollTop = debugInfo.scrollHeight
+        }
+        
+        /**
+         * 显示状态提示
+         */
+        function showStatus(message, type = 'success') {
+            status.textContent = message
+            status.className = `status show ${type}`
+            setTimeout(() => status.classList.remove('show'), 5000)
+        }
+        
+        // 初始化
+        document.addEventListener('DOMContentLoaded', init)
+    </script>
+</body>
+</html>

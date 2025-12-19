@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phigros按键转换器</title>
+    <link rel="stylesheet" href="common.css">
+</head>
+<body>
+    <div class="container">
+    <header>
+            <h1>Phigros按键转换器</h1>
+        </header>
+        
+        
+        <div class="main-content">
+            <div class="upload-area" id="uploadArea">
+                <div class="upload-icon">📁</div>
+                <p>上传Phigros谱面ZIP文件</p>
+                <input type="file" id="fileInput" accept=".zip">
+            </div>
+            
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p>处理中...</p>
+            </div>
+            
+            <div class="controls-section" id="controlsSection">
+                <div class="file-info" id="fileInfo">
+                    <div class="info-item">
+                        <span>文件:</span>
+                        <span id="fileName">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span>按键数:</span>
+                        <span id="noteCount">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span>格式:</span>
+                        <span id="formatType">-</span>
+                    </div>
+                </div>
+                
+                <div class="conversion-controls">
+                    <div class="conversion-options">
+                        <button class="conversion-btn" data-type="tap">Tap</button>
+                        <button class="conversion-btn" data-type="drag">Drag</button>
+                        <button class="conversion-btn" data-type="hold">Hold</button>
+                        <button class="conversion-btn" data-type="flick">Flick</button>
+                    </div>
+                    
+                    <div class="hold-controls" id="holdControls">
+                        <div class="hold-option">
+                            <input type="checkbox" id="includeHold" checked>
+                            <label for="includeHold">包含Hold按键</label>
+                        </div>
+                        <div class="hold-length" id="holdLengthControl">
+                            <label>最小长度:</label>
+                            <input type="number" id="holdLength" value="200" min="50" max="1000">
+                            <span>ms</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <button class="download-btn" id="downloadBtn" disabled>
+                    下载转换后的ZIP文件
+                </button>
+                
+                <div class="status" id="status"></div>
+            </div>
+        </div>
+        
+        <footer>
+            <p>本工具完全在浏览器中运行，不会上传文件到服务器</p>
+        </footer>
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script>
+        let originalZip = null;
+        let jsonFileName = null;
+        let chartData = null;
+        let selectedType = 'tap';
+        let originalFileName = '';
+        let detectedFormat = null;
+        let originalBPMList = null;
+        
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const loading = document.getElementById('loading');
+        const controlsSection = document.getElementById('controlsSection');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const status = document.getElementById('status');
+        const holdControls = document.getElementById('holdControls');
+        const holdLengthControl = document.getElementById('holdLengthControl');
+        const includeHoldCheck = document.getElementById('includeHold');
+        const holdLengthInput = document.getElementById('holdLength');
+        const fileNameSpan = document.getElementById('fileName');
+        const noteCountSpan = document.getElementById('noteCount');
+        const formatTypeSpan = document.getElementById('formatType');
+        
+        function init() {
+            uploadArea.addEventListener('click', () => fileInput.click());
+            uploadArea.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                uploadArea.style.borderColor = '#3498db';
+            });
+            uploadArea.addEventListener('dragleave', () => {
+                uploadArea.style.borderColor = '#bdc3c7';
+            });
+            uploadArea.addEventListener('drop', (e) => {
+                e.preventDefault();
+                uploadArea.style.borderColor = '#bdc3c7';
+                if (e.dataTransfer.files.length) {
+                    handleFileUpload(e.dataTransfer.files[0]);
+                }
+            });
+            fileInput.addEventListener('change', (e) => {
+                if (e.target.files.length) {
+                    handleFileUpload(e.target.files[0]);
+                }
+            });
+            document.querySelectorAll('.conversion-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    document.querySelectorAll('.conversion-btn').forEach(b => b.classList.remove('selected'));
+                    this.classList.add('selected');
+                    selectedType = this.dataset.type;
+                    if (selectedType === 'hold') {
+                        holdLengthControl.style.display = 'flex';
+                        includeHoldCheck.style.display = 'none';
+                    } else {
+                        holdLengthControl.style.display = 'none';
+                        includeHoldCheck.style.display = 'flex';
+                    }
+                });
+            });
+            document.querySelector('.conversion-btn[data-type="tap"]').click();
+            downloadBtn.addEventListener('click', downloadConvertedZip);
+        }
+        
+        function getTypeValue(type) {
+            const values = { tap: 1, drag: 2, hold: 3, flick: 4 };
+            return values[type] || 1;
+        }
+        
+        function detectFormat(jsonData) {
+            if (jsonData.formatVersion !== undefined) {
+                return 'official';
+            } else if (jsonData.BPMList !== undefined) {
+                return 'rpe';
+            }
+            return null;
+        }
+        
+        function rpeBeatToSec(beat, bpmList, bpmFactor = 1.0) {
+            if (!bpmList || bpmList.length === 0) return 0;
+            let sec = 0.0;
+            for (let i = 0; i < bpmList.length; i++) {
+                const e = bpmList[i];
+                const bpmv = e.bpm / bpmFactor;
+                if (i !== bpmList.length - 1) {
+                    const nextBeat = bpmList[i + 1].startTime;
+                    const et_beat = nextBeat - e.startTime;
+                    if (beat >= et_beat) {
+                        sec += et_beat * (60 / bpmv);
+                        beat -= et_beat;
+                    } else {
+                        sec += beat * (60 / bpmv);
+                        return sec;
+                    }
+                } else {
+                    sec += beat * (60 / bpmv);
+                    return sec;
+                }
+            }
+            return sec;
+        }
+        
+        function officialTToSec(t, bpm) {
+            return t * (1.875 / bpm);
+        }
+        
+        function parseChartData(jsonData, format) {
+            if (format === 'official') {
+                return parseOfficialFormat(jsonData);
+            } else if (format === 'rpe') {
+                return parseRPEFormat(jsonData);
+            }
+            throw new Error(`不支持的格式: ${format}`);
+        }
+        
+        function parseOfficialFormat(jsonData) {
+            const internalData = {
+                format: 'official',
+                offset: jsonData.offset || 0,
+                judgeLineList: []
+            };
+            (jsonData.judgeLineList || []).forEach((line) => {
+                const notes = [];
+                ['notesAbove', 'notesBelow'].forEach(field => {
+                    if (line[field] && Array.isArray(line[field])) {
+                        line[field].forEach(note => {
+                            notes.push({
+                                type: note.type,
+                                time: note.time,
+                                holdTime: note.type === 3 ? (note.holdTime || 0) : 0,
+                                positionX: note.positionX || 0,
+                                speed: note.speed || 1,
+                                bpm: line.bpm,
+                                isFake: false
+                            });
+                        });
+                    }
+                });
+                internalData.judgeLineList.push({
+                    bpm: line.bpm || 120,
+                    notes: notes
+                });
+            });
+            return internalData;
+        }
+        
+        function parseRPEFormat(jsonData) {
+            const internalData = {
+                format: 'rpe',
+                offset: 0,
+                judgeLineList: []
+            };
+            const globalBpmList = jsonData.BPMList || [];
+            (jsonData.judgeLineList || []).forEach((line) => {
+                const notes = [];
+                const lineBpmFactor = line.bpmfactor || 1.0;
+                if (line.notes && Array.isArray(line.notes)) {
+                    line.notes.forEach(note => {
+                        if (note.isFake === 1) return;
+                        const beat = note.startTime || 0;
+                        const seconds = rpeBeatToSec(beat, globalBpmList, lineBpmFactor);
+                        const bpm = line.bpm || 120;
+                        const timeInT = seconds / (1.875 / bpm);
+                        let officialType = note.type;
+                        if (note.type === 2) officialType = 3;
+                        else if (note.type === 3) officialType = 4;
+                        else if (note.type === 4) officialType = 2;
+                        notes.push({
+                            type: officialType,
+                            time: Math.round(timeInT),
+                            holdTime: note.type === 2 ? rpeBeatToSec((note.endTime - note.startTime), globalBpmList, lineBpmFactor) / (1.875 / bpm) : 0,
+                            positionX: note.positionX || 0,
+                            speed: note.speed || 1,
+                            bpm: bpm,
+                            isFake: false
+                        });
+                    });
+                }
+                internalData.judgeLineList.push({
+                    bpm: line.bpm || 120,
+                    notes: notes
+                });
+            });
+            return internalData;
+        }
+        
+        function convertChartData() {
+            if (!chartData) return null;
+            const convertedData = JSON.parse(JSON.stringify(chartData));
+            const targetTypeValue = getTypeValue(selectedType);
+            const includeHold = includeHoldCheck.checked;
+            const holdMinLength = parseInt(holdLengthInput.value) || 200;
+            let stats = { converted: 0, skipped: 0, flickConverted: 0 };
+            convertedData.judgeLineList.forEach((judgeLine) => {
+                judgeLine.notes.forEach((note) => {
+                    const originalType = note.type;
+                    if (originalType === 4) {
+                        convertSingleNote(note, targetTypeValue, holdMinLength);
+                        stats.converted++;
+                        stats.flickConverted++;
+                        return;
+                    }
+                    if (originalType === 3 && !includeHold) {
+                        stats.skipped++;
+                        return;
+                    }
+                    convertSingleNote(note, targetTypeValue, holdMinLength);
+                    stats.converted++;
+                });
+            });
+            console.log(`转换统计: ${stats.converted}个已转换 (含${stats.flickConverted}个Flick), ${stats.skipped}个Hold被跳过`);
+            return convertedData;
+        }
+        
+        function convertSingleNote(note, targetTypeValue, holdMinLength) {
+            const originalType = note.type;
+            if (targetTypeValue === 3) {
+                note.holdTime = (note.time || 0) + holdMinLength;
+            } else {
+                if (originalType === 3) note.holdTime = 0;
+            }
+            note.type = targetTypeValue;
+        }
+        
+        function convertToOutputFormat(internalData, targetFormat) {
+            if (targetFormat === 'official') {
+                const output = {
+                    formatVersion: 3,
+                    offset: internalData.offset,
+                    judgeLineList: internalData.judgeLineList.map(line => ({
+                        bpm: line.bpm,
+                        notesAbove: line.notes.filter(n => !n.isFake).map(n => ({
+                            type: n.type,
+                            time: n.time,
+                            holdTime: n.type === 3 ? n.holdTime : 0,
+                            positionX: n.positionX,
+                            speed: n.speed,
+                            floorPosition: 0
+                        })),
+                        notesBelow: [],
+                        speedEvents: [],
+                        judgeLineDisappearEvents: [],
+                        judgeLineMoveEvents: [],
+                        judgeLineRotateEvents: []
+                    }))
+                };
+                return output;
+            }
+            return internalData;
+        }
+        
+        function countNotes(chartData) {
+            let count = 0;
+            if (chartData.judgeLineList) {
+                chartData.judgeLineList.forEach(line => {
+                    if (line.notes) count += line.notes.length;
+                });
+            }
+            return count;
+        }
+        
+        async function handleFileUpload(file) {
+            if (!file.name.toLowerCase().endsWith('.zip')) {
+                showStatus('请上传ZIP文件', 'error');
+                return;
+            }
+            loading.classList.add('show');
+            try {
+                const arrayBuffer = await file.arrayBuffer();
+                originalZip = await JSZip.loadAsync(arrayBuffer);
+                originalFileName = file.name.replace(/\.zip$/i, '');
+                const jsonFiles = [];
+                originalZip.forEach((relativePath, fileEntry) => {
+                    if (!fileEntry.dir && relativePath.toLowerCase().endsWith('.json')) {
+                        jsonFiles.push(relativePath);
+                    }
+                });
+                if (jsonFiles.length === 0) {
+                    throw new Error('ZIP文件中未找到JSON文件');
+                }
+                jsonFileName = jsonFiles[0];
+                const jsonFile = originalZip.file(jsonFileName);
+                if (!jsonFile) {
+                    throw new Error('无法读取JSON文件');
+                }
+                const jsonText = await jsonFile.async('text');
+                const rawJsonData = JSON.parse(jsonText);
+                detectedFormat = detectFormat(rawJsonData);
+                if (!detectedFormat) throw new Error('无法识别的谱面格式');
+                originalBPMList = rawJsonData.BPMList;
+                chartData = parseChartData(rawJsonData, detectedFormat);
+                const noteCount = chartData.judgeLineList.reduce((sum, line) => sum + (line.notes ? line.notes.length : 0), 0);
+                noteCountSpan.textContent = noteCount;
+                fileNameSpan.textContent = file.name;
+                formatTypeSpan.textContent = detectedFormat.toUpperCase();
+                controlsSection.classList.add('show');
+                downloadBtn.disabled = false;
+                showStatus('成功加载谱面', 'success');
+            } catch (error) {
+                showStatus('处理失败: ' + error.message, 'error');
+                console.error('详细错误:', error);
+            } finally {
+                loading.classList.remove('show');
+            }
+        }
+        
+        async function downloadConvertedZip() {
+            if (!originalZip || !chartData) {
+                showStatus('请先上传ZIP文件', 'error');
+                return;
+            }
+            downloadBtn.textContent = '处理中...';
+            downloadBtn.disabled = true;
+            try {
+                const internalConvertedData = convertChartData();
+                const outputJsonData = convertToOutputFormat(internalConvertedData, 'official');
+                const modifiedZip = new JSZip();
+                const promises = [];
+                originalZip.forEach((relativePath, file) => {
+                    if (!file.dir) {
+                        promises.push(
+                            file.async('uint8array').then(content => {
+                                if (relativePath === jsonFileName) {
+                                    modifiedZip.file(relativePath, JSON.stringify(outputJsonData, null, 2));
+                                } else {
+                                    modifiedZip.file(relativePath, content);
+                                }
+                            })
+                        );
+                    }
+                });
+                await Promise.all(promises);
+                const zipBlob = await modifiedZip.generateAsync({
+                    type: 'blob',
+                    compression: "DEFLATE",
+                    compressionOptions: { level: 9 }
+                });
+                const url = URL.createObjectURL(zipBlob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${originalFileName}_${selectedType}.zip`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                showStatus(`下载成功！格式: ${detectedFormat} -> 官方`, 'success');
+            } catch (error) {
+                showStatus('下载失败: ' + error.message, 'error');
+            } finally {
+                downloadBtn.textContent = '下载转换后的ZIP文件';
+                downloadBtn.disabled = false;
+            }
+        }
+        
+        function showStatus(message, type = 'success') {
+            status.textContent = message;
+            status.className = `status show ${type}`;
+            setTimeout(() => {
+                status.classList.remove('show');
+            }, 3000);
+        }
+        
+        document.addEventListener('DOMContentLoaded', () => {
+            init();
+        });
+    </script>
+</body>
+</html>

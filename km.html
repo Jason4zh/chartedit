@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phigros按键转换器</title>
+    <link rel="stylesheet" href="common.css">
+    <style>
+        .upload-area:active { transform: scale(0.98); }
+        .upload-area.dragging { background: #e3f2fd; border-color: #2196f3; }
+        .format-badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: bold; }
+        .format-rpe { background: #e3f2fd; color: #1976d2; }
+        .format-phi { background: #f3e5f5; color: #7b1fa2; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Phigros按键转换器</h1>
+        </header>
+        
+        <div class="main-content">
+            <div class="upload-area" id="uploadArea">
+                <div class="upload-icon">📁</div>
+                <p>拖拽或点击上传Phigros谱面ZIP文件</p>
+                <input type="file" id="fileInput" accept=".zip" style="display: none;">
+            </div>
+            
+            <div class="loading" id="loading" style="display: none;">
+                <div class="spinner"></div>
+                <p>正在解析谱面结构...</p>
+            </div>
+            
+            <div class="controls-section" id="controlsSection" style="display: none;">
+                <div class="file-info" id="fileInfo">
+                    <div class="info-item">
+                        <span>文件:</span>
+                        <span id="fileName">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span>按键数:</span>
+                        <span id="noteCount">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span>格式:</span>
+                        <span id="chartFormat">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span>版本:</span>
+                        <span id="formatVersion">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span>判定线:</span>
+                        <span id="judgeLineCount">-</span>
+                    </div>
+                </div>
+                
+                <div class="conversion-controls">
+                    <div class="conversion-options">
+                        <button class="conversion-btn" data-type="tap">Tap</button>
+                        <button class="conversion-btn" data-type="drag">Drag</button>
+                        <button class="conversion-btn" data-type="hold">Hold</button>
+                        <button class="conversion-btn" data-type="flick">Flick</button>
+                    </div>
+                    
+                    <div class="hold-controls" id="holdControls">
+                        <div class="hold-option">
+                            <input type="checkbox" id="includeHold" checked>
+                            <label for="includeHold">包含Hold音符</label>
+                        </div>
+                        <div class="hold-length" id="holdLengthControl">
+                            <label>Hold长度:</label>
+                            <input type="number" id="holdLength" value="200" min="50" max="2000" step="50">
+                            <span>ms</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <button class="download-btn" id="downloadBtn" disabled>
+                    下载转换后的ZIP文件
+                </button>
+                
+                <div class="status" id="status" style="display: none;"></div>
+                
+                <div class="debug-info" id="debugInfo" style="display: none; margin-top: 20px; padding: 15px; background: #f5f5f5; border-radius: 4px; font-family: monospace; font-size: 12px; max-height: 500px; overflow-y: auto;">
+                    <h4 style="margin-bottom: 10px; color: #2c3e50;">调试信息</h4>
+                    <div id="debugContent"></div>
+                </div>
+            </div>
+        </div>
+        
+        <footer>
+            <p>本工具完全在浏览器中运行，不会上传文件到服务器</p>
+        </footer>
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script>
+        // ==================== 全局变量 ====================
+        let originalZip = null;
+        let jsonFileName = null;
+        let chartData = null;
+        let chartFormat = null; // 'rpe' 或 'phi'
+        let selectedType = 'tap';
+        let originalFileName = '';
+        let isProcessing = false;
+
+        // ==================== DOM元素 ====================
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const loading = document.getElementById('loading');
+        const controlsSection = document.getElementById('controlsSection');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const status = document.getElementById('status');
+        const debugInfo = document.getElementById('debugInfo');
+        const debugContent = document.getElementById('debugContent');
+        
+        // 信息展示区
+        const fileNameSpan = document.getElementById('fileName');
+        const noteCountSpan = document.getElementById('noteCount');
+        const chartFormatSpan = document.getElementById('chartFormat');
+        const formatVersionSpan = document.getElementById('formatVersion');
+        const judgeLineCountSpan = document.getElementById('judgeLineCount');
+
+        // ==================== 初始化 ====================
+        function init() {
+            // 点击上传
+            uploadArea.addEventListener('click', () => fileInput.click());
+            
+            // 文件选择
+            fileInput.addEventListener('change', (e) => {
+                if (e.target.files.length > 0) {
+                    handleFileUpload(e.target.files[0]);
+                }
+            });
+            
+            // 拖拽上传
+            uploadArea.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                uploadArea.classList.add('dragging');
+            });
+            
+            uploadArea.addEventListener('dragleave', () => {
+                uploadArea.classList.remove('dragging');
+            });
+            
+            uploadArea.addEventListener('drop', (e) => {
+                e.preventDefault();
+                uploadArea.classList.remove('dragging');
+                if (e.dataTransfer.files.length > 0) {
+                    handleFileUpload(e.dataTransfer.files[0]);
+                }
+            });
+            
+            // 转换按钮
+            document.querySelectorAll('.conversion-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    document.querySelectorAll('.conversion-btn').forEach(b => b.classList.remove('selected'));
+                    this.classList.add('selected');
+                    selectedType = this.dataset.type;
+                    
+                    // Hold控制显示/隐藏
+                    const holdLengthControl = document.getElementById('holdLengthControl');
+                    const includeHoldCheck = document.getElementById('includeHold');
+                    if (selectedType === 'hold') {
+                        holdLengthControl.style.display = 'flex';
+                        includeHoldCheck.style.display = 'none';
+                    } else {
+                        holdLengthControl.style.display = 'none';
+                        includeHoldCheck.style.display = 'flex';
+                    }
+                });
+            });
+            
+            // 默认选择Tap
+            document.querySelector('.conversion-btn[data-type="tap"]').click();
+            
+            // 下载按钮
+            downloadBtn.addEventListener('click', downloadConvertedZip);
+        }
+
+        // ==================== 格式检测 ====================
+        /**
+         * 严格判断谱面格式
+         * RPE格式特征：BPMList + judgeLineList.notesAbove/Below
+         * 官方格式特征：formatVersion + noteList
+         */
+        function determineChartFormat(data) {
+            // ===== RPE格式检测 =====
+            if (data.BPMList && Array.isArray(data.BPMList)) {
+                if (data.judgeLineList && Array.isArray(data.judgeLineList)) {
+                    // 验证第一条判定线结构
+                    if (data.judgeLineList.length > 0) {
+                        const firstLine = data.judgeLineList[0];
+                        if (firstLine.hasOwnProperty('notesAbove') || firstLine.hasOwnProperty('notesBelow')) {
+                            return 'rpe';
+                        }
+                    }
+                }
+            }
+            
+            // ===== 官方格式检测 =====
+            if (data.formatVersion !== undefined && data.noteList && Array.isArray(data.noteList)) {
+                // 验证音符结构
+                if (data.noteList.length > 0) {
+                    const firstNote = data.noteList[0];
+                    if (firstNote.hasOwnProperty('type') && firstNote.hasOwnProperty('time') && firstNote.hasOwnProperty('judgeLine')) {
+                        return 'phi';
+                    }
+                } else {
+                    // 空noteList也认为是官方格式
+                    return 'phi';
+                }
+            }
+            
+            return 'unknown';
+        }
+
+        // ==================== Type映射 ====================
+        /**
+         * UI类型名 -> 格式特定的数值
+         * RPE: 1=Tap, 2=Hold, 3=Flick, 4=Drag
+         * 官方: 1=Tap, 2=Drag, 3=Hold, 4=Flick
+         */
+        function getFormatTypeValue(format, uiType) {
+            const mapping = {
+                rpe: { tap: 1, hold: 2, flick: 3, drag: 4 },
+                phi: { tap: 1, drag: 2, hold: 3, flick: 4 }
+            };
+            return mapping[format][uiType];
+        }
+
+        /**
+         * 数值 -> 显示名称（用于调试）
+         */
+        function getTypeName(format, typeValue) {
+            const mapping = {
+                rpe: { 1: 'Tap', 2: 'Hold', 3: 'Flick', 4: 'Drag' },
+                phi: { 1: 'Tap', 2: 'Drag', 3: 'Hold', 4: 'Flick' }
+            };
+            return mapping[format][typeValue] || `Unknown(${typeValue})`;
+        }
+
+        // ==================== 文件上传 ====================
+        async function handleFileUpload(file) {
+            if (isProcessing) return;
+            
+            // 验证文件
+            if (!file || !file.name.toLowerCase().endsWith('.zip')) {
+                showStatus('请上传ZIP文件', 'error');
+                return;
+            }
+            
+            if (file.size === 0) {
+                showStatus('文件为空', 'error');
+                return;
+            }
+            
+            isProcessing = true;
+            loading.classList.add('show');
+            debugInfo.style.display = 'block';
+            showDebugInfo('文件信息', [
+                `名称: ${file.name}`,
+                `大小: ${(file.size / 1024).toFixed(2)} KB`
+            ]);
+            
+            try {
+                // 读取ZIP
+                const arrayBuffer = await file.arrayBuffer();
+                originalZip = await JSZip.loadAsync(arrayBuffer);
+                
+                // 查找JSON文件
+                const jsonFiles = [];
+                originalZip.forEach((relativePath, fileEntry) => {
+                    if (!fileEntry.dir && relativePath.toLowerCase().endsWith('.json')) {
+                        jsonFiles.push(relativePath);
+                    }
+                });
+                
+                if (jsonFiles.length === 0) {
+                    throw new Error('ZIP中未找到JSON文件');
+                }
+                
+                jsonFileName = jsonFiles[0];
+                originalFileName = file.name.replace(/\.zip$/i, '');
+                
+                // 读取JSON
+                const jsonFile = originalZip.file(jsonFileName);
+                const jsonText = await jsonFile.async('text');
+                chartData = JSON.parse(jsonText);
+                
+                // 检测格式
+                chartFormat = determineChartFormat(chartData);
+                if (chartFormat === 'unknown') {
+                    throw new Error('无法识别格式：缺少BPMList(RPE)或formatVersion(官方)');
+                }
+                
+                // 统计信息
+                const noteCount = countNotes(chartData, chartFormat);
+                const judgeLineCount = getJudgeLineCount(chartData, chartFormat);
+                
+                // 更新UI
+                fileNameSpan.textContent = file.name;
+                noteCountSpan.textContent = noteCount;
+                chartFormatSpan.innerHTML = `<span class="format-badge format-${chartFormat}">${chartFormat === 'rpe' ? 'RPE格式' : '官方格式'}</span>`;
+                formatVersionSpan.textContent = chartData.formatVersion || chartData.rpeVersion || '--';
+                judgeLineCountSpan.textContent = judgeLineCount;
+                
+                // 分析结构
+                analyzeChartStructure(chartData, chartFormat);
+                
+                // 显示控制面板
+                controlsSection.style.display = 'block';
+                downloadBtn.disabled = false;
+                
+                showStatus('谱面加载成功', 'success');
+                
+            } catch (error) {
+                console.error('上传失败:', error);
+                showStatus('加载失败: ' + error.message, 'error');
+                showDebugInfo('错误详情', [
+                    `错误: ${error.message}`,
+                    `堆栈: ${error.stack || '无'}`
+                ]);
+                
+                // 重置
+                controlsSection.style.display = 'none';
+                downloadBtn.disabled = true;
+                
+            } finally {
+                loading.classList.remove('show');
+                isProcessing = false;
+            }
+        }
+
+        // ==================== 统计分析 ====================
+        function countNotes(chartData, format) {
+            let count = 0;
+            
+            if (format === 'rpe') {
+                if (chartData.judgeLineList) {
+                    chartData.judgeLineList.forEach(line => {
+                        if (line.notesAbove) count += line.notesAbove.length;
+                        if (line.notesBelow) count += line.notesBelow.length;
+                    });
+                }
+            } else if (format === 'phi') {
+                if (chartData.noteList) {
+                    count = chartData.noteList.length;
+                }
+            }
+            
+            return count;
+        }
+
+        function getJudgeLineCount(chartData, format) {
+            if (format === 'rpe') {
+                return chartData.judgeLineList ? chartData.judgeLineList.length : 0;
+            } else if (format === 'phi') {
+                return chartData.judgeLineList ? chartData.judgeLineList.length : 0;
+            }
+            return 0;
+        }
+
+        function analyzeChartStructure(chartData, format) {
+            const info = [];
+            
+            if (format === 'rpe') {
+                info.push('=== RPE格式结构 ===');
+                
+                // BPM信息
+                if (chartData.BPMList && chartData.BPMList.length > 0) {
+                    info.push(`✓ BPM事件: ${chartData.BPMList.length} 个`);
+                    info.push(`  初始BPM: ${chartData.BPMList[0].bpm || '未知'}`);
+                }
+                
+                // 判定线
+                const lineCount = chartData.judgeLineList ? chartData.judgeLineList.length : 0;
+                info.push(`✓ 判定线: ${lineCount} 条`);
+                
+                // 音符分布
+                const typeStats = { 1: 0, 2: 0, 3: 0, 4: 0 };
+                let fakeCount = 0;
+                
+                chartData.judgeLineList.forEach((line, idx) => {
+                    const notes = [...(line.notesAbove || []), ...(line.notesBelow || [])];
+                    notes.forEach(note => {
+                        if (note.isFake === 1) fakeCount++;
+                        else if (typeStats.hasOwnProperty(note.type)) {
+                            typeStats[note.type]++;
+                        }
+                    });
+                });
+                
+                const total = Object.values(typeStats).reduce((a,b) => a+b, 0);
+                info.push(`✓ 音符统计: 共${total}个 (假音符${fakeCount}个)`);
+                info.push(`  Tap: ${typeStats[1]} | Hold: ${typeStats[2]} | Flick: ${typeStats[3]} | Drag: ${typeStats[4]}`);
+                
+            } else if (format === 'phi') {
+                info.push('=== 官方格式结构 ===');
+                
+                info.push(`✓ 格式版本: ${chartData.formatVersion}`);
+                info.push(`✓ 判定线: ${chartData.judgeLineList ? chartData.judgeLineList.length : 0} 条`);
+                
+                const typeStats = { 1: 0, 2: 0, 3: 0, 4: 0 };
+                if (chartData.noteList) {
+                    chartData.noteList.forEach(note => {
+                        if (typeStats.hasOwnProperty(note.type)) {
+                            typeStats[note.type]++;
+                        }
+                    });
+                }
+                
+                const total = Object.values(typeStats).reduce((a,b) => a+b, 0);
+                info.push(`✓ 音符统计: 共${total}个`);
+                info.push(`  Tap: ${typeStats[1]} | Drag: ${typeStats[2]} | Hold: ${typeStats[3]} | Flick: ${typeStats[4]}`);
+            }
+            
+            showDebugInfo('结构分析', info);
+        }
+
+        // ==================== 转换逻辑 ====================
+        function convertChartData() {
+            if (!chartData || !chartFormat) {
+                throw new Error('没有加载谱面数据');
+            }
+
+            const convertedData = JSON.parse(JSON.stringify(chartData));
+            const targetTypeValue = getFormatTypeValue(chartFormat, selectedType);
+            const includeHold = includeHoldCheck.checked;
+            const holdMinLength = parseInt(holdLengthInput.value) || 200;
+
+            let totalConverted = 0;
+            let totalSkipped = 0;
+            
+            const log = [
+                `目标类型: ${selectedType} (${getTypeName(chartFormat, targetTypeValue)})`,
+                `包含Hold: ${includeHold}`,
+                `Hold长度: ${holdMinLength}ms`
+            ];
+
+            if (chartFormat === 'rpe') {
+                log.push('\n--- RPE格式转换 ---');
+                
+                chartData.judgeLineList.forEach((line, lineIndex) => {
+                    const processLine = (notes, position) => {
+                        if (!notes || notes.length === 0) return { c: 0, s: 0 };
+                        
+                        let converted = 0, skipped = 0;
+                        notes.forEach(note => {
+                            if (note.isFake === 1) return; // 跳过假音符
+                            
+                            const originalType = note.type;
+                            if (originalType === 2 && !includeHold) { // Hold在RPE是type=2
+                                skipped++;
+                                return;
+                            }
+                            
+                            if (originalType !== targetTypeValue) {
+                                converted++;
+                                note.type = targetTypeValue;
+                                
+                                // Hold特殊处理
+                                if (targetTypeValue === 2) { // RPE的Hold
+                                    // RPE使用startTime和endTime，需要设置endTime
+                                    // 这里简化处理，保持原有结构
+                                } else if (note.hasOwnProperty('holdTime')) {
+                                    delete note.holdTime;
+                                }
+                            }
+                        });
+                        
+                        return { c: converted, s: skipped };
+                    };
+                    
+                    const above = processLine(convertedData.judgeLineList[lineIndex].notesAbove, 'Above');
+                    const below = processLine(convertedData.judgeLineList[lineIndex].notesBelow, 'Below');
+                    
+                    totalConverted += above.c + below.c;
+                    totalSkipped += above.s + below.s;
+                    
+                    if (above.c + above.s + below.c + below.s > 0) {
+                        log.push(`  判定线${lineIndex + 1}: 转换${above.c + below.c}个, 跳过${above.s + below.s}个`);
+                    }
+                });
+                
+            } else if (chartFormat === 'phi') {
+                log.push('\n--- 官方格式转换 ---');
+                
+                chartData.noteList.forEach((note, index) => {
+                    const originalType = note.type;
+                    
+                    // 官方格式Hold是type=3
+                    if (originalType === 3 && !includeHold) {
+                        totalSkipped++;
+                        return;
+                    }
+                    
+                    if (originalType !== targetTypeValue) {
+                        totalConverted++;
+                        note.type = targetTypeValue;
+                        
+                        // Hold特殊处理
+                        if (targetTypeValue === 3) { // 官方Hold
+                            note.holdTime = note.holdTime || holdMinLength;
+                        } else if (note.hasOwnProperty('holdTime')) {
+                            delete note.holdTime;
+                        }
+                    }
+                });
+                
+                log.push(`  总计: 转换${totalConverted}个, 跳过${totalSkipped}个`);
+            }
+
+            log.push(`\n=== 转换完成 ===`);
+            log.push(`总计: 转换 ${totalConverted} 个, 跳过 ${totalSkipped} 个`);
+            
+            showDebugInfo('转换日志', log);
+            
+            return convertedData;
+        }
+
+        // ==================== 下载 ====================
+        async function downloadConvertedZip() {
+            if (!originalZip || !chartData || !chartFormat) {
+                showStatus('请先上传谱面', 'error');
+                return;
+            }
+
+            isProcessing = true;
+            downloadBtn.textContent = '生成中...';
+            downloadBtn.disabled = true;
+            
+            try {
+                const convertedData = convertChartData();
+                
+                // 创建新ZIP
+                const modifiedZip = new JSZip();
+                const files = [];
+                
+                originalZip.forEach((relativePath) => {
+                    if (!originalZip.file(relativePath).dir) {
+                        files.push(relativePath);
+                    }
+                });
+                
+                // 并行处理所有文件
+                await Promise.all(files.map(async (relativePath) => {
+                    if (relativePath === jsonFileName) {
+                        // 替换JSON
+                        const jsonStr = JSON.stringify(convertedData);
+                        modifiedZip.file(relativePath, jsonStr);
+                    } else {
+                        // 复制其他文件
+                        const content = await originalZip.file(relativePath).async('uint8array');
+                        modifiedZip.file(relativePath, content);
+                    }
+                }));
+                
+                // 生成并下载
+                const zipBlob = await modifiedZip.generateAsync({
+                    type: 'blob',
+                    compression: "DEFLATE",
+                    compressionOptions: { level: 9 }
+                });
+                
+                const url = URL.createObjectURL(zipBlob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${originalFileName}_${selectedType}.zip`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                
+                showStatus('下载成功！', 'success');
+                
+            } catch (error) {
+                console.error('下载失败:', error);
+                showStatus('下载失败: ' + error.message, 'error');
+            } finally {
+                downloadBtn.textContent = '下载转换后的ZIP文件';
+                downloadBtn.disabled = false;
+                isProcessing = false;
+            }
+        }
+
+        // ==================== UI辅助 ====================
+        function showDebugInfo(title, content) {
+            if (!debugInfo || !debugContent) return;
+            
+            debugInfo.style.display = 'block';
+            debugContent.innerHTML = `<strong style="color: #2c3e50;">${title}</strong><br>`;
+            
+            if (Array.isArray(content)) {
+                content.forEach(line => {
+                    const color = line.startsWith('❌') ? '#e74c3c' : 
+                                 line.startsWith('✓') ? '#27ae60' : 
+                                 line.startsWith('⚠') ? '#f39c12' : 
+                                 line.startsWith('---') || line.startsWith('===') ? '#9b59b6' : '#34495e';
+                    debugContent.innerHTML += `<span style="color: ${color};">${line}</span><br>`;
+                });
+            } else if (typeof content === 'object') {
+                for (const [key, value] of Object.entries(content)) {
+                    debugContent.innerHTML += `<span style="color: #34495e;">${key}:</span> <span style="color: #7f8c8d;">${value}</span><br>`;
+                }
+            } else {
+                debugContent.innerHTML += content;
+            }
+            
+            // 自动滚动
+            debugContent.parentElement.scrollTop = debugContent.parentElement.scrollHeight;
+        }
+
+        function showStatus(message, type = 'success') {
+            if (!status) return;
+            
+            status.textContent = message;
+            status.className = `status show ${type}`;
+            status.style.display = 'block';
+            
+            setTimeout(() => {
+                status.classList.remove('show');
+                setTimeout(() => { status.style.display = 'none'; }, 300);
+            }, 5000);
+        }
+
+        // ==================== 启动 ====================
+        document.addEventListener('DOMContentLoaded', () => {
+            init();
+        });
+
+        // 全局错误捕获
+        window.addEventListener('error', (event) => {
+            console.error('全局错误:', event.error);
+            showStatus('发生未知错误，请查看控制台', 'error');
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phigros按键转换器</title>
+    <link rel="stylesheet" href="common.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Phigros按键转换器</h1>
+        </header>
+        
+        <div class="main-content">
+            <div class="upload-area" id="uploadArea">
+                <div class="upload-icon">📁</div>
+                <p>上传Phigros谱面ZIP文件</p>
+                <input type="file" id="fileInput" accept=".zip">
+            </div>
+            
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p>处理中...</p>
+            </div>
+            
+            <div class="controls-section" id="controlsSection">
+                <div class="file-info" id="fileInfo">
+                    <div class="info-item">
+                        <span>文件:</span>
+                        <span id="fileName">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span>按键数:</span>
+                        <span id="noteCount">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span>格式:</span>
+                        <span id="chartFormat">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span>formatVersion:</span>
+                        <span id="formatVersion">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span>判定线数:</span>
+                        <span id="judgeLineCount">-</span>
+                    </div>
+                </div>
+                
+                <div class="conversion-controls">
+                    <div class="conversion-options">
+                        <button class="conversion-btn" data-type="tap">Tap</button>
+                        <button class="conversion-btn" data-type="drag">Drag</button>
+                        <button class="conversion-btn" data-type="hold">Hold</button>
+                        <button class="conversion-btn" data-type="flick">Flick</button>
+                    </div>
+                    
+                    <div class="hold-controls" id="holdControls">
+                        <div class="hold-option">
+                            <input type="checkbox" id="includeHold" checked>
+                            <label for="includeHold">包含Hold按键</label>
+                        </div>
+                        <div class="hold-length" id="holdLengthControl">
+                            <label>最小长度:</label>
+                            <input type="number" id="holdLength" value="200" min="50" max="1000">
+                            <span>ms</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <button class="download-btn" id="downloadBtn" disabled>
+                    下载转换后的ZIP文件
+                </button>
+                
+                <div class="status" id="status"></div>
+                
+                <div class="debug-info" id="debugInfo" style="display: none; margin-top: 20px; padding: 15px; background: #f5f5f5; border-radius: 4px; font-family: monospace; font-size: 12px;">
+                    <h4 style="margin-bottom: 10px;">调试信息</h4>
+                    <div id="debugContent"></div>
+                </div>
+            </div>
+        </div>
+        
+        <footer>
+            <p>本工具完全在浏览器中运行，不会上传文件到服务器</p>
+        </footer>
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script>
+        let originalZip = null;
+        let jsonFileName = null;
+        let chartData = null;
+        let chartFormat = null; // 'rpe' 或 'phi'
+        let selectedType = 'tap';
+        let originalFileName = '';
+
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const loading = document.getElementById('loading');
+        const controlsSection = document.getElementById('controlsSection');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const status = document.getElementById('status');
+        const holdControls = document.getElementById('holdControls');
+        const holdLengthControl = document.getElementById('holdLengthControl');
+        const includeHoldCheck = document.getElementById('includeHold');
+        const holdLengthInput = document.getElementById('holdLength');
+
+        const fileNameSpan = document.getElementById('fileName');
+        const noteCountSpan = document.getElementById('noteCount');
+        const chartFormatSpan = document.getElementById('chartFormat');
+        const formatVersionSpan = document.getElementById('formatVersion');
+        const judgeLineCountSpan = document.getElementById('judgeLineCount');
+        const debugInfo = document.getElementById('debugInfo');
+        const debugContent = document.getElementById('debugContent');
+
+        function init() {
+            uploadArea.addEventListener('click', () => fileInput.click());
+            
+            uploadArea.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                uploadArea.style.borderColor = '#3498db';
+            });
+            
+            uploadArea.addEventListener('dragleave', () => {
+                uploadArea.style.borderColor = '#bdc3c7';
+            });
+            
+            uploadArea.addEventListener('drop', (e) => {
+                e.preventDefault();
+                uploadArea.style.borderColor = '#bdc3c7';
+                if (e.dataTransfer.files.length) {
+                    handleFileUpload(e.dataTransfer.files[0]);
+                }
+            });
+            
+            fileInput.addEventListener('change', (e) => {
+                if (e.target.files.length) {
+                    handleFileUpload(e.target.files[0]);
+                }
+            });
+            
+            document.querySelectorAll('.conversion-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    document.querySelectorAll('.conversion-btn').forEach(b => b.classList.remove('selected'));
+                    this.classList.add('selected');
+                    selectedType = this.dataset.type;
+                    
+                    if (selectedType === 'hold') {
+                        holdLengthControl.style.display = 'flex';
+                        includeHoldCheck.style.display = 'none';
+                    } else {
+                        holdLengthControl.style.display = 'none';
+                        includeHoldCheck.style.display = 'flex';
+                    }
+                });
+            });
+            
+            document.querySelector('.conversion-btn[data-type="tap"]').click();
+            
+            downloadBtn.addEventListener('click', downloadConvertedZip);
+        }
+
+        function getTypeValue(type) {
+            const values = { tap: 1, drag: 2, hold: 3, flick: 4 };
+            return values[type] || 1;
+        }
+
+        /**
+         * 严格判断谱面格式
+         * @param {Object} data - 解析后的JSON数据
+         * @returns {'rpe'|'phi'|'unknown'} 格式类型
+         */
+        function determineChartFormat(data) {
+            // 验证RPE格式：必须存在judgeLineList且为数组
+            if (data.judgeLineList && Array.isArray(data.judgeLineList)) {
+                // 进一步验证：RPE格式的判定线应该有notesAbove/notesBelow属性
+                if (data.judgeLineList.length > 0) {
+                    const firstLine = data.judgeLineList[0];
+                    // 如果有bpmList，很可能是RPE
+                    if (data.bpmList && Array.isArray(data.bpmList)) {
+                        return 'rpe';
+                    }
+                    // 检查notesAbove/notesBelow是否存在
+                    if (firstLine.hasOwnProperty('notesAbove') || firstLine.hasOwnProperty('notesBelow')) {
+                        return 'rpe';
+                    }
+                    // 检查version字段
+                    if (data.formatVersion && data.formatVersion.toString().includes('rpe')) {
+                        return 'rpe';
+                    }
+                }
+            }
+            
+            // 验证官方格式：必须存在noteList且为数组
+            if (data.noteList && Array.isArray(data.noteList)) {
+                // 验证note结构
+                if (data.noteList.length > 0) {
+                    const firstNote = data.noteList[0];
+                    // 官方格式的note必须有type, time, judgeLine属性
+                    if (firstNote.hasOwnProperty('type') && 
+                        firstNote.hasOwnProperty('time') && 
+                        firstNote.hasOwnProperty('judgeLine')) {
+                        return 'phi';
+                    }
+                }
+            }
+            
+            return 'unknown';
+        }
+
+        async function handleFileUpload(file) {
+            if (!file.name.toLowerCase().endsWith('.zip')) {
+                showStatus('请上传ZIP文件', 'error');
+                return;
+            }
+            
+            loading.classList.add('show');
+            
+            try {
+                const arrayBuffer = await file.arrayBuffer();
+                originalZip = await JSZip.loadAsync(arrayBuffer);
+                
+                originalFileName = file.name.replace(/\.zip$/i, '');
+                
+                const jsonFiles = [];
+                originalZip.forEach((relativePath, fileEntry) => {
+                    if (!fileEntry.dir && relativePath.toLowerCase().endsWith('.json')) {
+                        jsonFiles.push(relativePath);
+                    }
+                });
+                
+                if (jsonFiles.length === 0) {
+                    throw new Error('ZIP文件中未找到JSON文件');
+                }
+                
+                jsonFileName = jsonFiles[0];
+                
+                const jsonFile = originalZip.file(jsonFileName);
+                if (!jsonFile) {
+                    throw new Error('无法读取JSON文件');
+                }
+                
+                const jsonText = await jsonFile.async('text');
+                chartData = JSON.parse(jsonText);
+                
+                // 确定谱面格式
+                chartFormat = determineChartFormat(chartData);
+                if (chartFormat === 'unknown') {
+                    throw new Error('无法识别的谱面格式。请确保是RPE或官方格式的谱面文件。');
+                }
+                
+                // 显示详细的谱面信息
+                const noteCount = countNotes(chartData, chartFormat);
+                const judgeLineCount = getJudgeLineCount(chartData, chartFormat);
+                
+                fileNameSpan.textContent = file.name;
+                noteCountSpan.textContent = noteCount;
+                chartFormatSpan.textContent = chartFormat === 'rpe' ? 'RPE' : '官方格式';
+                formatVersionSpan.textContent = chartData.formatVersion || '--';
+                judgeLineCountSpan.textContent = judgeLineCount;
+                
+                // 显示调试信息
+                showDebugInfo('原始谱面加载成功', {
+                    '文件名': file.name,
+                    '谱面格式': chartFormat === 'rpe' ? 'RPE' : '官方格式',
+                    'formatVersion': chartData.formatVersion || '--',
+                    '判定线数量': judgeLineCount,
+                    '总按键数': noteCount,
+                    'JSON文件': jsonFileName
+                });
+                
+                // 分析谱面结构
+                analyzeChartStructure(chartData, chartFormat);
+                
+                controlsSection.classList.add('show');
+                debugInfo.style.display = 'block';
+                downloadBtn.disabled = false;
+                
+                showStatus('成功加载谱面', 'success');
+                
+            } catch (error) {
+                showStatus('处理失败: ' + error.message, 'error');
+                showDebugInfo('加载失败', { '错误': error.message });
+            } finally {
+                loading.classList.remove('show');
+            }
+        }
+
+        /**
+         * 根据不同格式计数音符
+         * RPE: 音符分布在judgeLineList[].notesAbove/Below中
+         * 官方: 音符在noteList中
+         */
+        function countNotes(chartData, format) {
+            if (format === 'rpe') {
+                let count = 0;
+                if (chartData.judgeLineList) {
+                    chartData.judgeLineList.forEach(line => {
+                        if (line.notesAbove && Array.isArray(line.notesAbove)) {
+                            count += line.notesAbove.length;
+                        }
+                        if (line.notesBelow && Array.isArray(line.notesBelow)) {
+                            count += line.notesBelow.length;
+                        }
+                    });
+                }
+                return count;
+            } else if (format === 'phi') {
+                return chartData.noteList && Array.isArray(chartData.noteList) ? chartData.noteList.length : 0;
+            }
+            return 0;
+        }
+
+        /**
+         * 获取判定线数量
+         */
+        function getJudgeLineCount(chartData, format) {
+            if (format === 'rpe') {
+                return chartData.judgeLineList && Array.isArray(chartData.judgeLineList) ? chartData.judgeLineList.length : 0;
+            } else if (format === 'phi') {
+                return chartData.judgeLineList && Array.isArray(chartData.judgeLineList) ? chartData.judgeLineList.length : 0;
+            }
+            return 0;
+        }
+
+        /**
+         * 分析谱面结构，显示详细信息
+         */
+        function analyzeChartStructure(chartData, format) {
+            const structureInfo = [];
+            
+            if (format === 'rpe') {
+                structureInfo.push('=== RPE格式谱面结构分析 ===');
+                
+                if (!chartData.judgeLineList || !Array.isArray(chartData.judgeLineList)) {
+                    structureInfo.push('❌ 未找到judgeLineList或不是数组');
+                    return;
+                }
+                
+                // 显示BPM信息
+                if (data.bpmList && Array.isArray(data.bpmList)) {
+                    structureInfo.push(`✓ BPM列表: ${data.bpmList.length} 个节拍点`);
+                }
+                
+                chartData.judgeLineList.forEach((line, lineIndex) => {
+                    structureInfo.push(`\n判定线 ${lineIndex + 1}:`);
+                    
+                    // 统计该判定线的音符
+                    let aboveCount = 0, belowCount = 0;
+                    if (line.notesAbove && Array.isArray(line.notesAbove)) {
+                        aboveCount = line.notesAbove.length;
+                        structureInfo.push(`  ✓ notesAbove: ${aboveCount} 个按键`);
+                    }
+                    if (line.notesBelow && Array.isArray(line.notesBelow)) {
+                        belowCount = line.notesBelow.length;
+                        structureInfo.push(`  ✓ notesBelow: ${belowCount} 个按键`);
+                    }
+                    
+                    if (aboveCount === 0 && belowCount === 0) {
+                        structureInfo.push(`  ❌ 该判定线上没有找到按键`);
+                    }
+                    
+                    // 显示前几个音符的详情
+                    const allNotes = [];
+                    if (line.notesAbove) allNotes.push(...line.notesAbove.map(n => ({...n, position: 'Above'})));
+                    if (line.notesBelow) allNotes.push(...line.notesBelow.map(n => ({...n, position: 'Below'})));
+                    
+                    allNotes.slice(0, 3).forEach((note, i) => {
+                        structureInfo.push(`    音符${i+1}: type=${getTypeName(note.type)}, time=${note.time.toFixed(2)}, pos=${note.position}`);
+                    });
+                    if (allNotes.length > 3) {
+                        structureInfo.push(`    ... 还有 ${allNotes.length - 3} 个音符`);
+                    }
+                });
+            } else if (format === 'phi') {
+                structureInfo.push('=== 官方格式谱面结构分析 ===');
+                
+                // 检查判定线
+                if (!chartData.judgeLineList || !Array.isArray(chartData.judgeLineList)) {
+                    structureInfo.push('❌ 未找到judgeLineList');
+                } else {
+                    structureInfo.push(`✓ 判定线列表: ${chartData.judgeLineList.length} 条`);
+                }
+                
+                // 检查音符列表
+                if (!chartData.noteList || !Array.isArray(chartData.noteList)) {
+                    structureInfo.push('❌ 未找到noteList');
+                } else {
+                    const noteCount = chartData.noteList.length;
+                    structureInfo.push(`✓ 音符列表: ${noteCount} 个音符`);
+                    
+                    // 按判定线分组统计
+                    const notesByLine = {};
+                    chartData.noteList.forEach(note => {
+                        const lineId = note.judgeLine;
+                        if (!notesByLine[lineId]) notesByLine[lineId] = [];
+                        notesByLine[lineId].push(note);
+                    });
+                    
+                    Object.keys(notesByLine).sort((a,b) => parseInt(a)-parseInt(b)).forEach(lineId => {
+                        const notes = notesByLine[lineId];
+                        structureInfo.push(`  判定线 ${lineId}: ${notes.length} 个音符`);
+                        
+                        // 显示前几个
+                        notes.slice(0, 2).forEach((note, i) => {
+                            structureInfo.push(`    音符${i+1}: type=${getTypeName(note.type)}, time=${note.time.toFixed(2)}`);
+                        });
+                    });
+                }
+            }
+            
+            showDebugInfo('谱面结构分析', structureInfo);
+        }
+
+        /**
+         * 获取音符类型名称
+         */
+        function getTypeName(typeValue) {
+            const typeMap = { 1: 'Tap', 2: 'Drag', 3: 'Hold', 4: 'Flick' };
+            return typeMap[typeValue] || `Unknown(${typeValue})`;
+        }
+
+        /**
+         * 核心转换函数：根据格式类型应用不同的转换逻辑
+         */
+        function convertChartData() {
+            if (!chartData || !chartFormat) return null;
+
+            // 深拷贝原始数据
+            const convertedData = JSON.parse(JSON.stringify(chartData));
+            const targetTypeValue = getTypeValue(selectedType);
+            const includeHold = includeHoldCheck.checked;
+            const holdMinLength = parseInt(holdLengthInput.value) || 200;
+
+            let totalConverted = 0;
+            let totalSkipped = 0;
+            const conversionLog = [`=== 开始转换: 目标类型=${getTypeName(targetTypeValue)} ===`];
+
+            if (chartFormat === 'rpe') {
+                conversionLog.push('\n--- 处理RPE格式 ---');
+                
+                if (!convertedData.judgeLineList || !Array.isArray(convertedData.judgeLineList)) {
+                    throw new Error('RPE格式错误: 缺少judgeLineList');
+                }
+
+                convertedData.judgeLineList.forEach((judgeLine, lineIndex) => {
+                    conversionLog.push(`\n判定线 ${lineIndex + 1}:`);
+                    
+                    // 处理上方音符
+                    if (judgeLine.notesAbove && Array.isArray(judgeLine.notesAbove)) {
+                        conversionLog.push(`  notesAbove: ${judgeLine.notesAbove.length} 个`);
+                        const result = processNotesArray(
+                            judgeLine.notesAbove, 
+                            targetTypeValue, 
+                            includeHold, 
+                            holdMinLength, 
+                            conversionLog,
+                            '    '
+                        );
+                        totalConverted += result.converted;
+                        totalSkipped += result.skipped;
+                    }
+                    
+                    // 处理下方音符
+                    if (judgeLine.notesBelow && Array.isArray(judgeLine.notesBelow)) {
+                        conversionLog.push(`  notesBelow: ${judgeLine.notesBelow.length} 个`);
+                        const result = processNotesArray(
+                            judgeLine.notesBelow, 
+                            targetTypeValue, 
+                            includeHold, 
+                            holdMinLength, 
+                            conversionLog,
+                            '    '
+                        );
+                        totalConverted += result.converted;
+                        totalSkipped += result.skipped;
+                    }
+                });
+            } else if (chartFormat === 'phi') {
+                conversionLog.push('\n--- 处理官方格式 ---');
+                
+                if (!convertedData.noteList || !Array.isArray(convertedData.noteList)) {
+                    throw new Error('官方格式错误: 缺少noteList');
+                }
+
+                conversionLog.push(`noteList: ${convertedData.noteList.length} 个音符`);
+                const result = processNotesArray(
+                    convertedData.noteList,
+                    targetTypeValue,
+                    includeHold,
+                    holdMinLength,
+                    conversionLog,
+                    '  '
+                );
+                totalConverted += result.converted;
+                totalSkipped += result.skipped;
+            }
+
+            conversionLog.push(`\n=== 转换完成 ===`);
+            conversionLog.push(`总计: 转换了 ${totalConverted} 个, 跳过了 ${totalSkipped} 个`);
+            
+            // 更新numOfNotes字段（如果存在）
+            if (convertedData.numOfNotes !== undefined) {
+                const finalNoteCount = countNotes(convertedData, chartFormat);
+                convertedData.numOfNotes = finalNoteCount;
+                conversionLog.push(`更新了 numOfNotes: ${finalNoteCount}`);
+            }
+
+            showDebugInfo('转换过程详情', conversionLog);
+            return convertedData;
+        }
+
+        /**
+         * 处理音符数组（通用逻辑）
+         * @param {Array} notesArray - 音符数组
+         * @param {number} targetType - 目标类型值
+         * @param {boolean} includeHold - 是否包含Hold
+         * @param {number} holdMinLength - Hold最小长度
+         * @param {Array} log - 日志数组
+         * @param {string} indent - 日志缩进
+         * @returns {Object} {converted, skipped}
+         */
+        function processNotesArray(notesArray, targetType, includeHold, holdMinLength, log, indent = '') {
+            let converted = 0;
+            let skipped = 0;
+            
+            // 预扫描统计
+            const typeStats = {};
+            notesArray.forEach(note => {
+                typeStats[note.type] = (typeStats[note.type] || 0) + 1;
+            });
+            
+            log.push(`${indent}原始分布: ${Object.entries(typeStats).map(([t,c]) => `${getTypeName(parseInt(t))}:${c}`).join(', ')}`);
+            
+            // 处理每个音符
+            notesArray.forEach((note, index) => {
+                const originalType = note.type;
+                
+                // 跳过条件：是Hold且未勾选包含Hold
+                if (originalType === 3 && !includeHold) {
+                    skipped++;
+                    return;
+                }
+                
+                // 无需转换：已经是目标类型
+                if (originalType === targetType) {
+                    return;
+                }
+                
+                // 执行转换
+                converted++;
+                
+                // Hold特殊处理
+                if (targetType === 3) { // 转换为Hold
+                    // RPE和官方格式的Hold都使用holdTime
+                    note.holdTime = holdMinLength;
+                } else { // 转换非Hold
+                    // 移除holdTime属性（如果存在）
+                    if (note.hasOwnProperty('holdTime')) {
+                        delete note.holdTime;
+                    }
+                }
+                
+                // 修改类型
+                note.type = targetType;
+                
+                // 记录前几个转换详情
+                if (converted <= 3) {
+                    log.push(`${indent}  转换: ${getTypeName(originalType)} -> ${getTypeName(targetType)} (time=${note.time.toFixed(2)})`);
+                }
+            });
+            
+            // 后扫描统计
+            const finalStats = {};
+            notesArray.forEach(note => {
+                finalStats[note.type] = (finalStats[note.type] || 0) + 1;
+            });
+            log.push(`${indent}转换后分布: ${Object.entries(finalStats).map(([t,c]) => `${getTypeName(parseInt(t))}:${c}`).join(', ')}`);
+            
+            return { converted, skipped };
+        }
+
+        /**
+         * 下载转换后的ZIP文件
+         */
+        async function downloadConvertedZip() {
+            if (!originalZip || !chartData) {
+                showStatus('请先上传ZIP文件', 'error');
+                return;
+            }
+            
+            if (!chartFormat) {
+                showStatus('未知的谱面格式', 'error');
+                return;
+            }
+            
+            downloadBtn.textContent = '处理中...';
+            downloadBtn.disabled = true;
+            
+            try {
+                const convertedData = convertChartData();
+                if (!convertedData) {
+                    throw new Error('转换失败');
+                }
+                
+                // 验证转换结果
+                const validationLog = ['=== 转换验证 ==='];
+                const finalNoteCount = countNotes(convertedData, chartFormat);
+                validationLog.push(`总音符数: ${finalNoteCount}`);
+                
+                // 显示格式特定信息
+                if (chartFormat === 'rpe') {
+                    const lineWithNotes = convertedData.judgeLineList.filter(line => 
+                        (line.notesAbove && line.notesAbove.length > 0) || 
+                        (line.notesBelow && line.notesBelow.length > 0)
+                    ).length;
+                    validationLog.push(`有音符的判定线: ${lineWithNotes}`);
+                } else if (chartFormat === 'phi') {
+                    const typeStats = {};
+                    convertedData.noteList.forEach(note => {
+                        typeStats[note.type] = (typeStats[note.type] || 0) + 1;
+                    });
+                    validationLog.push(`音符分布: ${Object.entries(typeStats).map(([t,c]) => `${getTypeName(parseInt(t))}:${c}`).join(', ')}`);
+                }
+                
+                showDebugInfo('转换验证', validationLog);
+                
+                // 创建新的ZIP文件
+                const modifiedZip = new JSZip();
+                const promises = [];
+                
+                originalZip.forEach((relativePath, file) => {
+                    if (!file.dir) {
+                        promises.push(
+                            file.async('uint8array').then(content => {
+                                if (relativePath === jsonFileName) {
+                                    // 使用紧凑的JSON格式
+                                    modifiedZip.file(relativePath, JSON.stringify(convertedData));
+                                } else {
+                                    modifiedZip.file(relativePath, content);
+                                }
+                            })
+                        );
+                    }
+                });
+                
+                await Promise.all(promises);
+                
+                // 生成ZIP文件
+                const zipBlob = await modifiedZip.generateAsync({
+                    type: 'blob',
+                    compression: "DEFLATE",
+                    compressionOptions: { level: 9 }
+                });
+                
+                // 下载
+                const url = URL.createObjectURL(zipBlob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${originalFileName}_${selectedType}.zip`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                
+                showStatus(`下载成功！转换了 ${finalNoteCount} 个音符`, 'success');
+                
+            } catch (error) {
+                showStatus('下载失败: ' + error.message, 'error');
+                showDebugInfo('下载错误', { '错误': error.message, '堆栈': error.stack });
+            } finally {
+                downloadBtn.textContent = '下载转换后的ZIP文件';
+                downloadBtn.disabled = false;
+            }
+        }
+
+        /**
+         * 显示调试信息
+         */
+        function showDebugInfo(title, content) {
+            debugContent.innerHTML = `<strong style="color: #2c3e50;">${title}:</strong><br>`;
+            
+            if (Array.isArray(content)) {
+                content.forEach(line => {
+                    debugContent.innerHTML += line + '<br>';
+                });
+            } else if (typeof content === 'object') {
+                for (const [key, value] of Object.entries(content)) {
+                    const displayValue = (typeof value === 'object') ? JSON.stringify(value) : value;
+                    debugContent.innerHTML += `<span style="color: #34495e;">${key}:</span> <span style="color: #7f8c8d;">${displayValue}</span><br>`;
+                }
+            } else {
+                debugContent.innerHTML += content;
+            }
+        }
+
+        /**
+         * 显示状态消息
+         */
+        function showStatus(message, type = 'success') {
+            status.textContent = message;
+            status.className = `status show ${type}`;
+            
+            setTimeout(() => {
+                status.classList.remove('show');
+            }, 5000);
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            init();
+        });
+    </script>
+</body>
+</html>
